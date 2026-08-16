@@ -20,6 +20,9 @@ target
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
+# Local feature worktrees (Morning Star Phase 2)
+.worktrees/
+
 # Morning Star harness (.mstar/)
 # Principle: process stays local; results are shared with the team.
 # Default-ignore everything under .mstar/, then re-include the tracked results.
