@@ -18,6 +18,7 @@
 
 pub mod error;
 pub mod protocol;
+pub mod transport;
 
 pub use error::Error;
 pub use protocol::{
@@ -26,3 +27,4 @@ pub use protocol::{
     Notification, ServerInfo, SessionEventNotification, SessionPromptParams, SessionPromptResult,
     SessionStatusNotification, SubagentFinishedNotification, SubagentStartedNotification,
 };
+pub use transport::JsonRpcLineTransport;

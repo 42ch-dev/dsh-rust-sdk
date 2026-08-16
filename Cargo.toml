@@ -10,6 +10,7 @@ tokio = { version = "1", features = ["process", "io-util", "time", "sync", "rt-m
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+tracing = "0.1"
 
 [lints.rust]
 unsafe_code = "forbid"
