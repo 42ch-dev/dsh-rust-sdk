@@ -34,6 +34,22 @@ pub struct JsonRpcLineTransport<R, W> {
     read_buf: Vec<u8>,
 }
 
+/// Serialize `value` compactly, append `\n`, and flush it to `writer`.
+///
+/// Shared by [`JsonRpcLineTransport::write_frame`] and the client's write
+/// path (the `HarnessClient` keeps its stdin write half separate from the
+/// read loop's stdout reader, so both serialize through this one helper).
+pub(crate) async fn write_frame<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    value: &Value,
+) -> Result<(), Error> {
+    let line = serde_json::to_vec(value)?;
+    writer.write_all(&line).await?;
+    writer.write_all(b"\n").await?;
+    writer.flush().await?;
+    Ok(())
+}
+
 impl<R, W> JsonRpcLineTransport<R, W>
 where
     R: AsyncRead + Unpin,
@@ -53,11 +69,7 @@ where
 
     /// Serialize `value` compactly, append `\n`, and flush.
     pub async fn write_frame(&mut self, value: &Value) -> Result<(), Error> {
-        let line = serde_json::to_vec(value)?;
-        self.writer.write_all(&line).await?;
-        self.writer.write_all(b"\n").await?;
-        self.writer.flush().await?;
-        Ok(())
+        write_frame(&mut self.writer, value).await
     }
 
     /// Read the next frame as a JSON value.

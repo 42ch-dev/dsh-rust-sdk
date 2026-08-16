@@ -16,10 +16,12 @@
 //! that leak into the public API. Divergences from the TypeScript client are
 //! documented where they occur (planned in plan 02, task 4).
 
+pub mod client;
 pub mod error;
 pub mod protocol;
 pub mod transport;
 
+pub use client::{ClientTimeouts, HarnessClient, LaunchSpec, NotificationSubscription};
 pub use error::Error;
 pub use protocol::{
     ContentBlock, ImageAttachmentRef, IncomingFrame, IncomingRequest, InitializeParams,

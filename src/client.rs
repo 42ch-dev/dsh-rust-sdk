@@ -1,0 +1,1136 @@
+//! Low-level process client for the DeepSeek Harness runtime.
+//!
+//! [`HarnessClient`] spawns the official runtime binary
+//! ([deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)) and
+//! speaks its stdio JSON-RPC 2.0 line protocol: typed request helpers
+//! ([`HarnessClient::initialize`], [`HarnessClient::session_prompt`]), a
+//! session-tree notification subscription
+//! ([`HarnessClient::subscribe_session_tree`]), and the documented close
+//! ladder ([`HarnessClient::close`]).
+//!
+//! The runtime's stdout is protocol-exclusive; its **stderr is captured**
+//! into a bounded 400-line tail (never inherited) that is embedded in
+//! transport and close diagnostics.
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::io;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
+
+use serde_json::{json, Value};
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
+use tokio::sync::{broadcast, oneshot};
+use tokio::task::JoinHandle;
+use uuid::Uuid;
+
+use crate::error::Error;
+use crate::protocol::{
+    ContentBlock, IncomingFrame, InitializeParams, InitializeResult, JsonRpcId,
+    JsonRpcResponseOutcome, Notification, SessionPromptParams, SessionPromptResult,
+};
+use crate::transport::{write_frame, JsonRpcLineTransport};
+
+/// How to launch the runtime process (the official
+/// `deepseek-harness-sdk-runtime` binary).
+#[derive(Debug, Clone)]
+pub struct LaunchSpec {
+    /// Path to (or name of) the runtime executable.
+    pub program: String,
+    /// Extra command-line arguments passed to the runtime.
+    pub args: Vec<String>,
+    /// Environment overrides; the parent environment is inherited and these
+    /// entries are layered on top.
+    pub envs: HashMap<String, String>,
+    /// Working directory for the runtime process, when set.
+    pub cwd: Option<PathBuf>,
+}
+
+/// Timeout ladder for requests and the close sequence.
+///
+/// Defaults follow the TypeScript client (`shutdownTimeoutMs` 1000 /
+/// `disposeEofGraceMs` 6000 / `disposeGraceMs` 3000). The longer EOF grace
+/// gives the runtime time to flush durable state after stdin closes.
+#[derive(Debug, Clone, Copy)]
+pub struct ClientTimeouts {
+    /// Per-request response deadline. `None` waits indefinitely (the Python
+    /// SDK default). There is no wire-level cancellation: on timeout the
+    /// client abandons the wait and removes the pending entry, while the
+    /// server-side work still runs until close.
+    pub request_timeout: Option<Duration>,
+    /// Bound for the cooperative `shutdown` request during [`HarnessClient::close`].
+    pub shutdown_timeout: Duration,
+    /// How long to wait for the runtime to exit after stdin EOF before
+    /// escalating to SIGTERM.
+    pub eof_grace: Duration,
+    /// How long to wait for the runtime to exit after SIGTERM before
+    /// escalating to SIGKILL.
+    pub term_grace: Duration,
+}
+
+impl Default for ClientTimeouts {
+    fn default() -> Self {
+        Self {
+            request_timeout: None,
+            shutdown_timeout: Duration::from_secs(1),
+            eof_grace: Duration::from_secs(6),
+            term_grace: Duration::from_secs(3),
+        }
+    }
+}
+
+/// Default capacity of the notification broadcast channel. When a slow
+/// receiver falls more than this many notifications behind, the oldest are
+/// dropped and the receiver observes `Lagged(n)` — documented drop-oldest
+/// behavior, matching the bounded queues of the reference clients.
+const DEFAULT_BROADCAST_CAPACITY: usize = 4096;
+
+/// Retained stderr lines used to diagnose an unexpected runtime death
+/// (Python `deque(maxlen=400)` / TS `STDERR_TAIL_LIMIT = 400` parity).
+const STDERR_TAIL_LIMIT: usize = 400;
+
+/// Upper bound for one retained stderr line, in bytes. A local guard so a
+/// pathological runtime cannot grow the tail without limit; longer lines are
+/// truncated (the reference clients only bound the *line count*).
+const MAX_STDERR_LINE: usize = 64 * 1024;
+
+/// Grace for joining the reader/stderr tasks after the runtime process has
+/// been reaped (Python joins with 0.5s; a stuck task is aborted so its pipes
+/// are released).
+const TASK_JOIN_GRACE: Duration = Duration::from_millis(500);
+
+/// Client state shared between the public handle, the read loop, and the
+/// stderr-capture task.
+#[derive(Debug, Default)]
+struct SharedState {
+    /// The runtime's exit code, once observed. `None` while it is still
+    /// running (or when it died by signal).
+    exit_code: Option<i32>,
+    /// Set once the client starts closing or the read loop sees stdout EOF.
+    closed: bool,
+    /// Captured runtime stderr, newest last, bounded to [`STDERR_TAIL_LIMIT`].
+    stderr_tail: VecDeque<String>,
+}
+
+/// The inner pending map: request id -> response sender.
+type PendingMap = Mutex<HashMap<String, oneshot::Sender<Result<Value, Error>>>>;
+/// Shared in-flight requests by request id (uuid-v4 string); the read loop
+/// resolves the matching sender when a response arrives.
+type PendingRequests = Arc<PendingMap>;
+
+/// A live, filtered subscription to one session tree's notifications.
+///
+/// Created by [`HarnessClient::subscribe_session_tree`]. Wraps a
+/// `broadcast::Receiver<Notification>`; dropping the handle unsubscribes it
+/// (the receiver detaches from the broadcast channel). The filter consults
+/// the client-side `subagent.started` parent→child edge map **live**, so
+/// descendants discovered mid-stream pass the filter from then on.
+///
+/// A subscription created after close (or after runtime death) is
+/// born-failed: [`NotificationSubscription::recv`] rejects immediately.
+#[derive(Debug)]
+pub struct NotificationSubscription {
+    receiver: Option<broadcast::Receiver<Notification>>,
+    parent_map: Arc<Mutex<HashMap<String, String>>>,
+    state: Arc<Mutex<SharedState>>,
+    root: String,
+}
+
+impl NotificationSubscription {
+    /// Wait for the next notification belonging to the subscribed tree.
+    ///
+    /// Already-delivered notifications are drained first, so a queue built up
+    /// before close/runtime death remains readable (reference parity); once
+    /// the channel (or the client) is closed, [`Error::TransportClosed`] is
+    /// returned with the process diagnostics. A receiver that falls behind
+    /// the broadcast capacity logs the drop and continues (documented
+    /// drop-oldest behavior).
+    pub async fn recv(&mut self) -> Result<Notification, Error> {
+        let Some(receiver) = self.receiver.as_mut() else {
+            return Err(closed_error(
+                &lock(&self.state),
+                "DeepSeek Harness runtime closed",
+            ));
+        };
+        loop {
+            match drain_queued(receiver, &self.parent_map, &self.root) {
+                DrainOutcome::Matched(notification) => return Ok(notification),
+                DrainOutcome::Closed => {
+                    return Err(closed_error(
+                        &lock(&self.state),
+                        "DeepSeek Harness runtime closed",
+                    ));
+                }
+                DrainOutcome::Empty => {}
+            }
+            let closed = lock(&self.state).closed;
+            if closed {
+                // Final drain: a notification may have landed between the
+                // drain above and the closed check.
+                if let DrainOutcome::Matched(notification) =
+                    drain_queued(receiver, &self.parent_map, &self.root)
+                {
+                    return Ok(notification);
+                }
+                return Err(closed_error(
+                    &lock(&self.state),
+                    "DeepSeek Harness runtime closed",
+                ));
+            }
+            match receiver.recv().await {
+                Ok(notification) => {
+                    let map = lock(&self.parent_map);
+                    if notification_in_tree(&map, &notification, &self.root) {
+                        return Ok(notification);
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    return Err(closed_error(
+                        &lock(&self.state),
+                        "DeepSeek Harness runtime closed",
+                    ));
+                }
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::debug!(
+                        skipped,
+                        "notification subscription fell behind; dropped oldest \
+                         notifications (documented drop-oldest behavior)"
+                    );
+                }
+            }
+        }
+    }
+}
+
+enum DrainOutcome {
+    Matched(Notification),
+    Empty,
+    Closed,
+}
+
+/// Pop one matching notification from the receiver's queue without waiting.
+fn drain_queued(
+    receiver: &mut broadcast::Receiver<Notification>,
+    parent_map: &Arc<Mutex<HashMap<String, String>>>,
+    root: &str,
+) -> DrainOutcome {
+    loop {
+        match receiver.try_recv() {
+            Ok(notification) => {
+                let map = lock(parent_map);
+                if notification_in_tree(&map, &notification, root) {
+                    return DrainOutcome::Matched(notification);
+                }
+            }
+            Err(broadcast::error::TryRecvError::Empty) => return DrainOutcome::Empty,
+            Err(broadcast::error::TryRecvError::Closed) => return DrainOutcome::Closed,
+            Err(broadcast::error::TryRecvError::Lagged(skipped)) => {
+                tracing::debug!(
+                    skipped,
+                    "notification subscription fell behind; dropped oldest \
+                     notifications (documented drop-oldest behavior)"
+                );
+            }
+        }
+    }
+}
+
+/// Low-level JSON-RPC client for the DeepSeek Harness SDK runtime over
+/// subprocess stdio.
+///
+/// A spawned client owns a read-loop task that parses stdout frames into
+/// responses (resolving the matching pending request), notifications (fanned
+/// out to subscriptions), and client-directed server requests (answered with
+/// `-32601`, mirroring the reference transport — the DSH server currently
+/// sends none, so this path is defensive).
+#[derive(Debug)]
+pub struct HarnessClient {
+    /// The runtime process. Locked for non-blocking exit polls and the close
+    /// ladder; `None` once closed.
+    child: Option<Arc<tokio::sync::Mutex<Child>>>,
+    /// Shared stdin write half. The read loop holds only a [`Weak`] reference
+    /// so dropping this (stdin EOF) actually closes the runtime's stdin.
+    stdin: Option<Arc<tokio::sync::Mutex<ChildStdin>>>,
+    /// In-flight requests by request id (uuid-v4 string).
+    pending: PendingRequests,
+    /// `subagent.started` parent→child session edges (client-side tree).
+    parent_map: Arc<Mutex<HashMap<String, String>>>,
+    /// Shared client state (exit code, closed flag, stderr tail).
+    state: Arc<Mutex<SharedState>>,
+    /// Notification producer; `None` after close (subscriptions then drain
+    /// their queues and see the channel close).
+    notifications: Option<broadcast::Sender<Notification>>,
+    /// The stdout read-loop task, joined by [`HarnessClient::close`].
+    read_task: Option<JoinHandle<()>>,
+    /// The stderr-capture task.
+    stderr_task: Option<JoinHandle<()>>,
+    /// The configured timeout ladder.
+    timeouts: ClientTimeouts,
+}
+
+impl HarnessClient {
+    /// Spawn the runtime process with a default 4096-notification broadcast
+    /// capacity and start reading its stdout.
+    ///
+    /// The runtime's stderr is captured to a bounded 400-line tail (not
+    /// inherited) and embedded in transport/close diagnostics.
+    pub fn spawn(spec: LaunchSpec, timeouts: ClientTimeouts) -> Result<Self, Error> {
+        Self::spawn_with_broadcast_capacity(spec, timeouts, DEFAULT_BROADCAST_CAPACITY)
+    }
+
+    /// Like [`HarnessClient::spawn`], with an explicit broadcast capacity for
+    /// the notification channel (the `Lagged(n)` drop-oldest behavior is
+    /// documented on [`NotificationSubscription`]).
+    pub fn spawn_with_broadcast_capacity(
+        spec: LaunchSpec,
+        timeouts: ClientTimeouts,
+        broadcast_capacity: usize,
+    ) -> Result<Self, Error> {
+        let mut command = Command::new(&spec.program);
+        command
+            .args(&spec.args)
+            .envs(&spec.envs)
+            .kill_on_drop(true)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(cwd) = &spec.cwd {
+            command.current_dir(cwd);
+        }
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                return Err(Error::RuntimeNotFound(format!("{}: {err}", spec.program)));
+            }
+            Err(err) => return Err(Error::Io(err)),
+        };
+        let stdin = child
+            .stdin
+            .take()
+            .expect("stdin was piped; take cannot fail");
+        let stdout = child
+            .stdout
+            .take()
+            .expect("stdout was piped; take cannot fail");
+        let stderr = child
+            .stderr
+            .take()
+            .expect("stderr was piped; take cannot fail");
+
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let parent_map = Arc::new(Mutex::new(HashMap::new()));
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        let (notifications, _) = broadcast::channel(broadcast_capacity.max(1));
+
+        let stdin_shared = Arc::new(tokio::sync::Mutex::new(stdin));
+
+        let read_stdin = Arc::downgrade(&stdin_shared);
+        let read_pending = Arc::clone(&pending);
+        let read_parent_map = Arc::clone(&parent_map);
+        let read_state = Arc::clone(&state);
+        let read_notifications = notifications.clone();
+        let read_task = tokio::spawn(async move {
+            let transport = JsonRpcLineTransport::new(stdout, tokio::io::sink());
+            read_loop(
+                transport,
+                read_stdin,
+                read_pending,
+                read_parent_map,
+                read_notifications,
+                read_state,
+            )
+            .await;
+        });
+
+        let stderr_state = Arc::clone(&state);
+        let stderr_task = tokio::spawn(async move { stderr_loop(stderr, stderr_state).await });
+
+        Ok(Self {
+            child: Some(Arc::new(tokio::sync::Mutex::new(child))),
+            stdin: Some(stdin_shared),
+            pending,
+            parent_map,
+            state,
+            notifications: Some(notifications),
+            read_task: Some(read_task),
+            stderr_task: Some(stderr_task),
+            timeouts,
+        })
+    }
+
+    /// Send one JSON-RPC request and await its result.
+    ///
+    /// Allocates a uuid-v4 request id, registers a pending slot, writes the
+    /// frame (the pending entry is registered **before** the write so a fast
+    /// response cannot be mistaken for an unknown id), and awaits the
+    /// response. When [`ClientTimeouts::request_timeout`] is set, the wait is
+    /// abandoned on timeout and the pending entry removed — there is no
+    /// wire-level cancellation, so server-side work continues. Responses for
+    /// unknown ids are dropped. When the runtime is already dead (or spawn
+    /// failed), fails fast with the exit code and captured stderr tail.
+    pub async fn request(&self, method: &str, params: Option<Value>) -> Result<Value, Error> {
+        // Fast-fail on a closed or dead runtime, with process context.
+        {
+            let st = lock(&self.state);
+            if st.closed {
+                return Err(closed_error(&st, "DeepSeek Harness runtime is not running"));
+            }
+            if st.exit_code.is_some() {
+                return Err(closed_error(&st, "DeepSeek Harness runtime is not running"));
+            }
+        }
+        if let Some(child) = &self.child {
+            let mut guard = child.lock().await;
+            if let Some(status) = guard.try_wait()? {
+                let code = status.code();
+                lock(&self.state).exit_code = code;
+                return Err(closed_error(
+                    &lock(&self.state),
+                    "DeepSeek Harness runtime is not running",
+                ));
+            }
+        }
+
+        let id = Uuid::new_v4().to_string();
+        let (tx, rx) = oneshot::channel();
+        // Register before writing so a response that races the write is not
+        // dropped as an unknown id (reference parity).
+        lock(&self.pending).insert(id.clone(), tx);
+
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params.unwrap_or_else(|| json!({})),
+        });
+        let stdin_arc = match &self.stdin {
+            Some(stdin) => stdin.clone(),
+            None => {
+                lock(&self.pending).remove(&id);
+                return Err(closed_error(
+                    &lock(&self.state),
+                    "DeepSeek Harness runtime is not running",
+                ));
+            }
+        };
+        {
+            let mut stdin = stdin_arc.lock().await;
+            if let Err(err) = write_frame(&mut *stdin, &frame).await {
+                drop(stdin);
+                lock(&self.pending).remove(&id);
+                // The runtime died between the fast-fail check and the write
+                // (EPIPE on a closed pipe); surface it with process context.
+                return Err(closed_error(
+                    &lock(&self.state),
+                    &format!("failed to write to DeepSeek Harness runtime: {err}"),
+                ));
+            }
+        }
+
+        let outcome = match self.timeouts.request_timeout {
+            Some(duration) => match tokio::time::timeout(duration, rx).await {
+                Ok(result) => result,
+                Err(elapsed) => {
+                    // Timeout abandonment: remove the pending entry so a late
+                    // response is dropped; the server-side work continues.
+                    lock(&self.pending).remove(&id);
+                    return Err(Error::RequestTimeout {
+                        method: method.to_string(),
+                        source: elapsed,
+                    });
+                }
+            },
+            None => rx.await,
+        };
+        match outcome {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(err)) => Err(err),
+            Err(_recv) => Err(closed_error(
+                &lock(&self.state),
+                "DeepSeek Harness runtime is not running",
+            )),
+        }
+    }
+
+    /// Perform the process-wide SDK handshake and validate the server
+    /// identity.
+    ///
+    /// Rejects `max_tokens == 0` (the server requires a positive integer) and
+    /// returns [`Error::SdkProtocol`] when `serverInfo.name` is absent or not
+    /// `deepseek-harness-sdk-runtime`, or when `version` is absent — the
+    /// protocol declares the name wire-stable and has no version negotiation,
+    /// so an unexpected identity is a hard protocol error.
+    pub async fn initialize(
+        &mut self,
+        cwd: impl Into<String>,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        max_tokens: Option<u32>,
+    ) -> Result<InitializeResult, Error> {
+        if max_tokens == Some(0) {
+            return Err(Error::SdkProtocol {
+                message: "maxTokens must be a positive integer".into(),
+            });
+        }
+        let params = InitializeParams {
+            cwd: cwd.into(),
+            provider: provider.into(),
+            model: model.into(),
+            max_tokens,
+        };
+        let result = self
+            .request("initialize", Some(serde_json::to_value(params)?))
+            .await?;
+        let init: InitializeResult =
+            serde_json::from_value(result).map_err(|err| Error::SdkProtocol {
+                message: format!("initialize returned no server identity: {err}"),
+            })?;
+        let name = init.server_info.name.as_deref();
+        let version = init.server_info.version.as_deref();
+        if name != Some("deepseek-harness-sdk-runtime") || version.is_none() {
+            return Err(Error::SdkProtocol {
+                message: format!(
+                    "initialize returned unexpected server identity: name={name:?}, version={version:?}"
+                ),
+            });
+        }
+        Ok(init)
+    }
+
+    /// Queue one prompt on a session and return its durable inbox message id.
+    ///
+    /// A `session_id` unknown to the runtime lazily creates the agent+session
+    /// pair. A response without a string `messageId` is a protocol error.
+    pub async fn session_prompt(
+        &mut self,
+        session_id: impl Into<String>,
+        blocks: Vec<ContentBlock>,
+    ) -> Result<String, Error> {
+        let params = SessionPromptParams {
+            session_id: session_id.into(),
+            content_blocks: blocks,
+        };
+        let result = self
+            .request("session/prompt", Some(serde_json::to_value(params)?))
+            .await?;
+        let prompt: SessionPromptResult =
+            serde_json::from_value(result).map_err(|err| Error::SdkProtocol {
+                message: format!("session/prompt returned no message id: {err}"),
+            })?;
+        Ok(prompt.message_id)
+    }
+
+    /// Subscribe to the notifications of one session and its descendants.
+    ///
+    /// Descendants are discovered from the client-side `subagent.started`
+    /// parent→child edge map: `subagent.started`/`subagent.finished`
+    /// notifications pass when their parent session is already in the tree
+    /// (or their child session is the root), and session-scoped notifications
+    /// pass when their `sessionId` is the root or a discovered descendant.
+    /// The filter consults the live edge map, so a child started after the
+    /// subscription is matched from its first event onward.
+    ///
+    /// A subscription created after close/runtime death is born-failed.
+    pub fn subscribe_session_tree(&self, root: &str) -> NotificationSubscription {
+        NotificationSubscription {
+            receiver: self
+                .notifications
+                .as_ref()
+                .map(broadcast::Sender::subscribe),
+            parent_map: Arc::clone(&self.parent_map),
+            state: Arc::clone(&self.state),
+            root: root.to_string(),
+        }
+    }
+
+    /// Shut the runtime down and reap it, resolving only after it exited.
+    ///
+    /// The close ladder per [`ClientTimeouts`]: a cooperative `shutdown`
+    /// request bounded by `shutdown_timeout` (diagnostic only on failure) →
+    /// drop stdin (EOF) → wait `eof_grace` → SIGTERM → wait `term_grace` →
+    /// SIGKILL → wait. Pending requests are resolved with
+    /// [`Error::TransportClosed`] and the read loop is joined; failure paths
+    /// surface the exit status and captured stderr tail. Idempotent.
+    pub async fn close(&mut self) -> Result<(), Error> {
+        // Idempotent: a second close (or a close of an already-closed client)
+        // returns immediately.
+        let Some(child_arc) = self.child.take() else {
+            return Ok(());
+        };
+
+        // Tier 1: cooperative `shutdown`, bounded. Failure is diagnostic
+        // only — the dispose ladder below is the authoritative teardown.
+        let shutdown = tokio::time::timeout(
+            self.timeouts.shutdown_timeout,
+            self.request("shutdown", None),
+        )
+        .await;
+        match shutdown {
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => {
+                tracing::debug!(error = %err, "shutdown request failed; dispose ladder is authoritative");
+                self.append_diagnostic(format!("shutdown request failed: {err}"));
+            }
+            Err(_elapsed) => {
+                tracing::debug!("shutdown request timed out; dispose ladder is authoritative");
+                self.append_diagnostic("shutdown request timed out".to_string());
+            }
+        }
+
+        // From here on the client is closed: new requests fast-fail and the
+        // read loop must not answer client-directed requests.
+        lock(&self.state).closed = true;
+
+        // Tier 2: drop stdin -> EOF on the runtime's stdin. The read loop
+        // holds only a weak reference, so the pipe truly closes here.
+        drop(self.stdin.take());
+
+        // Tiers 3-6: wait for exit after EOF, then escalate through SIGTERM
+        // and SIGKILL, waiting at each tier.
+        {
+            let mut child = child_arc.lock().await;
+            self.reap_with_ladder(&mut child).await?;
+        }
+
+        // The process is dead, so its stdio is closed. Resolve every pending
+        // request now — no waiter depends on the read loop's EOF timing (its
+        // own EOF resolution becomes a no-op once the map is empty).
+        self.fail_all_pending("DeepSeek Harness runtime closed");
+
+        // Join the reader and stderr tasks; abort a task stuck on a pipe a
+        // grandchild kept open after the process died.
+        for handle in [&mut self.read_task, &mut self.stderr_task] {
+            if let Some(mut handle) = handle.take() {
+                match tokio::time::timeout(TASK_JOIN_GRACE, &mut handle).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => {
+                        tracing::debug!(error = %err, "client background task failed");
+                    }
+                    Err(_elapsed) => handle.abort(),
+                }
+            }
+        }
+
+        // Drop the notification producer: existing subscriptions drain their
+        // queues and then see the channel close.
+        self.notifications = None;
+        Ok(())
+    }
+
+    /// Run the exit-wait ladder: stdin-EOF grace, then SIGTERM, then SIGKILL.
+    async fn reap_with_ladder(&self, child: &mut Child) -> Result<(), Error> {
+        if child.try_wait()?.is_some() {
+            self.record_exit(child);
+            return Ok(());
+        }
+        match tokio::time::timeout(self.timeouts.eof_grace, child.wait()).await {
+            Ok(Ok(_status)) => {
+                self.record_exit(child);
+                return Ok(());
+            }
+            Ok(Err(err)) => return Err(Error::Io(err)),
+            Err(_elapsed) => {}
+        }
+
+        // POSIX gets a catchable graceful signal; platforms without it (the
+        // non-goal Windows tier) skip straight to forced termination, like
+        // the TypeScript client.
+        #[cfg(unix)]
+        {
+            if let Err(err) = signal_child(child, Signal::SIGTERM) {
+                // The child may have exited between the wait timeout and now.
+                if child.try_wait()?.is_some() {
+                    self.record_exit(child);
+                    return Ok(());
+                }
+                return Err(Error::Io(err));
+            }
+            match tokio::time::timeout(self.timeouts.term_grace, child.wait()).await {
+                Ok(Ok(_status)) => {
+                    self.record_exit(child);
+                    return Ok(());
+                }
+                Ok(Err(err)) => return Err(Error::Io(err)),
+                Err(_elapsed) => {}
+            }
+        }
+
+        // Forced termination, then wait without a bound.
+        if let Err(err) = child.start_kill() {
+            if child.try_wait()?.is_some() {
+                self.record_exit(child);
+                return Ok(());
+            }
+            return Err(Error::Io(err));
+        }
+        child.wait().await?;
+        self.record_exit(child);
+        Ok(())
+    }
+
+    /// Cache the child's exit code in the shared state for diagnostics.
+    fn record_exit(&self, child: &mut Child) {
+        if let Ok(Some(status)) = child.try_wait() {
+            lock(&self.state).exit_code = status.code();
+        }
+    }
+
+    /// Append one line to the bounded stderr-tail diagnostics.
+    fn append_diagnostic(&self, line: String) {
+        if line.is_empty() {
+            return;
+        }
+        let mut st = lock(&self.state);
+        st.stderr_tail.push_back(line);
+        while st.stderr_tail.len() > STDERR_TAIL_LIMIT {
+            st.stderr_tail.pop_front();
+        }
+    }
+
+    /// Resolve every pending request with a transport-closed error carrying
+    /// the exit status and captured stderr tail.
+    fn fail_all_pending(&self, reason: &str) {
+        let senders: Vec<_> = {
+            let mut pending = lock(&self.pending);
+            pending.drain().map(|(_id, tx)| tx).collect()
+        };
+        for tx in senders {
+            let _ = tx.send(Err(closed_error(&lock(&self.state), reason)));
+        }
+    }
+}
+
+/// Drain the pending map into transport-closed errors (used by the read loop
+/// when stdout closes).
+fn fail_all_pending(pending: &PendingMap, state: &Mutex<SharedState>, reason: &str) {
+    let senders: Vec<_> = {
+        let mut pending = lock(pending);
+        pending.drain().map(|(_id, tx)| tx).collect()
+    };
+    for tx in senders {
+        let _ = tx.send(Err(closed_error(&lock(state), reason)));
+    }
+}
+
+/// The read loop: owns stdout, dispatches frames, and terminates the pending
+/// map when the transport closes.
+async fn read_loop(
+    mut transport: JsonRpcLineTransport<ChildStdout, tokio::io::Sink>,
+    stdin: Weak<tokio::sync::Mutex<ChildStdin>>,
+    pending: PendingRequests,
+    parent_map: Arc<Mutex<HashMap<String, String>>>,
+    notifications: broadcast::Sender<Notification>,
+    state: Arc<Mutex<SharedState>>,
+) {
+    loop {
+        match transport.read_frame().await {
+            Ok(Some(frame)) => {
+                dispatch_frame(frame, &pending, &parent_map, &notifications, &stdin).await
+            }
+            Ok(None) => break, // EOF: the runtime's stdout closed.
+            Err(err) => {
+                tracing::warn!(error = %err, "runtime stdout read failed; closing transport");
+                break;
+            }
+        }
+    }
+    fail_all_pending(&pending, &state, "DeepSeek Harness runtime stdout closed");
+    lock(&state).closed = true;
+}
+
+/// Dispatch one parsed frame: response / client-directed request /
+/// notification.
+async fn dispatch_frame(
+    frame: Value,
+    pending: &PendingMap,
+    parent_map: &Mutex<HashMap<String, String>>,
+    notifications: &broadcast::Sender<Notification>,
+    stdin: &Weak<tokio::sync::Mutex<ChildStdin>>,
+) {
+    let frame = match serde_json::from_value::<IncomingFrame>(frame) {
+        Ok(frame) => frame,
+        Err(err) => {
+            // A JSON line that matches none of the JSON-RPC frame shapes is
+            // ignored (the line transport already skips non-JSON lines).
+            tracing::debug!(error = %err, "ignoring frame that matches no JSON-RPC shape");
+            return;
+        }
+    };
+    match frame {
+        IncomingFrame::Response(response) => {
+            let key = match &response.id {
+                JsonRpcId::String(id) => id.clone(),
+                JsonRpcId::Number(id) => id.to_string(),
+            };
+            let waiter = lock(pending).remove(&key);
+            if let Some(tx) = waiter {
+                let outcome = match response.outcome {
+                    JsonRpcResponseOutcome::Success { result } => Ok(result),
+                    JsonRpcResponseOutcome::Error { error } => Err(Error::JsonRpc {
+                        code: error.code,
+                        message: error.message,
+                        data: error.data,
+                    }),
+                };
+                let _ = tx.send(outcome);
+            }
+            // A response for an unknown id (late response, or a response for
+            // an abandoned request) is dropped.
+        }
+        IncomingFrame::Request(request) => {
+            // The DSH server currently sends no client-directed requests; the
+            // answer mirrors the reference transport's method-not-found.
+            let Some(stdin) = stdin.upgrade() else {
+                return; // stdin already closed; nothing to answer with
+            };
+            let frame = json!({
+                "jsonrpc": "2.0",
+                "id": request.id,
+                "error": { "code": -32601, "message": format!("method not found: {}", request.method) },
+            });
+            let mut stdin = stdin.lock().await;
+            if let Err(err) = write_frame(&mut *stdin, &frame).await {
+                tracing::debug!(error = %err, "failed to answer client-directed request; runtime stdin is closed");
+            }
+        }
+        IncomingFrame::Notification(notification) => {
+            // Update the parent map before fan-out so the tree filter sees
+            // the fresh edge (descendants discovered mid-stream match from
+            // their first event onward).
+            record_session_relationship(&mut lock(parent_map), &notification);
+            let _ = notifications.send(notification);
+        }
+    }
+}
+
+/// The stderr-capture task: keeps the bounded 400-line tail of the runtime's
+/// stderr in the shared state for transport/close diagnostics.
+async fn stderr_loop(stderr: ChildStderr, state: Arc<Mutex<SharedState>>) {
+    let mut reader = BufReader::new(stderr);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line).await {
+            Ok(0) => break, // EOF
+            Ok(_) => {
+                // Local guard: cap one retained line so a pathological
+                // runtime cannot grow the tail without limit (the reference
+                // clients only bound the line count).
+                if line.len() > MAX_STDERR_LINE {
+                    line.truncate(MAX_STDERR_LINE);
+                }
+                let text = String::from_utf8_lossy(&line);
+                let text = text.trim_end(); // strips the newline and trailing whitespace
+                if !text.is_empty() {
+                    let mut st = lock(&state);
+                    st.stderr_tail.push_back(text.to_string());
+                    while st.stderr_tail.len() > STDERR_TAIL_LIMIT {
+                        st.stderr_tail.pop_front();
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::debug!(error = %err, "runtime stderr read failed");
+                break;
+            }
+        }
+    }
+}
+
+/// Build a transport-closed error with the exit status and captured stderr
+/// tail appended (TS `closedError` parity).
+///
+/// Takes the shared state by reference — callers hold the lock — so building
+/// the error never re-enters the (non-reentrant) state mutex.
+fn closed_error(state: &SharedState, reason: &str) -> Error {
+    let mut parts = vec![reason.to_string()];
+    if let Some(code) = state.exit_code {
+        parts.push(format!("exit code: {code}"));
+    }
+    if !state.stderr_tail.is_empty() {
+        parts.push(format!(
+            "stderr tail:\n{}",
+            state
+                .stderr_tail
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+    Error::TransportClosed(parts.join("\n"))
+}
+
+/// Lock a `std::sync::Mutex`, recovering from poisoning (no panic path holds
+/// these locks while panicking, so a poisoned lock still exposes valid data).
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Send a signal to the runtime child process (the close ladder's SIGTERM
+/// tier).
+#[cfg(unix)]
+fn signal_child(child: &Child, signal: Signal) -> io::Result<()> {
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+
+    let pid = child
+        .id()
+        .ok_or_else(|| io::Error::other("child process has no pid"))?;
+    kill(Pid::from_raw(pid as i32), signal).map_err(io::Error::other)
+}
+
+#[cfg(unix)]
+use nix::sys::signal::Signal;
+
+/// The client-side `subagent.started` parent→child edge map.
+type ParentMap = HashMap<String, String>;
+
+/// Record a parent→child session edge when `notification` is a well-formed
+/// `subagent.started` (both ids non-empty strings, parent != child).
+///
+/// Called by the read loop **before** fan-out so the tree filter sees fresh
+/// edges; reference parity with the Python and TypeScript clients.
+fn record_session_relationship(map: &mut ParentMap, notification: &Notification) {
+    if notification.method != "subagent.started" {
+        return;
+    }
+    let Some(parent) = notification
+        .payload
+        .get("parentSessionId")
+        .and_then(Value::as_str)
+        .filter(|parent| !parent.is_empty())
+    else {
+        return;
+    };
+    let Some(child) = notification
+        .payload
+        .get("childSessionId")
+        .and_then(Value::as_str)
+        .filter(|child| !child.is_empty() && *child != parent)
+    else {
+        return;
+    };
+    map.insert(child.to_string(), parent.to_string());
+}
+
+/// Whether `session` is `root` itself or reachable by walking parent edges.
+///
+/// The walk is cycle-guarded (the edge map only ever extends chains upward,
+/// so a cycle cannot form; the guard is defensive).
+fn is_descendant_of(map: &ParentMap, session: &str, root: &str) -> bool {
+    let mut visited: HashSet<&str> = HashSet::new();
+    let mut current = session;
+    loop {
+        if current == root {
+            return true;
+        }
+        if !visited.insert(current) {
+            return false;
+        }
+        match map.get(current) {
+            Some(parent) => current = parent.as_str(),
+            None => return false,
+        }
+    }
+}
+
+/// Whether a notification belongs to the session tree rooted at `root`.
+///
+/// `subagent.started`/`subagent.finished` pass when the parent session is
+/// already in the tree, or when the child session is the root itself; other
+/// notifications pass when their `sessionId` is in the tree.
+fn notification_in_tree(map: &ParentMap, notification: &Notification, root: &str) -> bool {
+    if matches!(
+        notification.method.as_str(),
+        "subagent.started" | "subagent.finished"
+    ) {
+        if let Some(parent) = notification
+            .payload
+            .get("parentSessionId")
+            .and_then(Value::as_str)
+        {
+            if is_descendant_of(map, parent, root) {
+                return true;
+            }
+        }
+        return notification
+            .payload
+            .get("childSessionId")
+            .and_then(Value::as_str)
+            == Some(root);
+    }
+    match notification
+        .payload
+        .get("sessionId")
+        .and_then(Value::as_str)
+    {
+        Some(session) => is_descendant_of(map, session, root),
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Map;
+
+    fn notification(method: &str, fields: &[(&str, Value)]) -> Notification {
+        let mut payload = Map::new();
+        for (key, value) in fields {
+            payload.insert((*key).to_string(), value.clone());
+        }
+        Notification {
+            method: method.to_string(),
+            payload,
+        }
+    }
+
+    fn started(parent: &str, child: &str) -> Notification {
+        notification(
+            "subagent.started",
+            &[
+                ("parentSessionId", json!(parent)),
+                ("childSessionId", json!(child)),
+            ],
+        )
+    }
+
+    fn event(session: &str) -> Notification {
+        notification(
+            "session.event",
+            &[
+                ("sessionId", json!(session)),
+                ("event", json!({ "type": "assistant/message" })),
+            ],
+        )
+    }
+
+    #[test]
+    fn parent_map_records_valid_started_edges_and_ignores_invalid() {
+        let mut map = ParentMap::new();
+        record_session_relationship(&mut map, &started("root", "child1"));
+        record_session_relationship(&mut map, &started("child1", "child2"));
+        // Non-`subagent.started` notifications never record edges.
+        record_session_relationship(&mut map, &event("root"));
+        record_session_relationship(
+            &mut map,
+            &notification(
+                "subagent.finished",
+                &[
+                    ("parentSessionId", json!("x")),
+                    ("childSessionId", json!("y")),
+                ],
+            ),
+        );
+        // Degenerate edges are ignored (reference parity).
+        record_session_relationship(&mut map, &started("root", ""));
+        record_session_relationship(&mut map, &started("", "child"));
+        record_session_relationship(&mut map, &started("same", "same"));
+        record_session_relationship(
+            &mut map,
+            &notification(
+                "subagent.started",
+                &[
+                    ("parentSessionId", json!(1)),
+                    ("childSessionId", json!("child")),
+                ],
+            ),
+        );
+
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get("child1").map(String::as_str), Some("root"));
+        assert_eq!(map.get("child2").map(String::as_str), Some("child1"));
+    }
+
+    #[test]
+    fn descendant_check_walks_edges_and_guards_cycles() {
+        let mut map = ParentMap::new();
+        record_session_relationship(&mut map, &started("root", "child1"));
+        record_session_relationship(&mut map, &started("child1", "child2"));
+        record_session_relationship(&mut map, &started("other", "child3"));
+
+        assert!(is_descendant_of(&map, "root", "root")); // the root itself
+        assert!(is_descendant_of(&map, "child1", "root"));
+        assert!(is_descendant_of(&map, "child2", "root"));
+        assert!(!is_descendant_of(&map, "child3", "root"));
+        assert!(!is_descendant_of(&map, "child3", "child1"));
+        assert!(is_descendant_of(&map, "child3", "other"));
+
+        // A cycle (impossible via the record rule, but the walk must not hang).
+        map.insert("a".into(), "b".into());
+        map.insert("b".into(), "a".into());
+        assert!(!is_descendant_of(&map, "a", "root"));
+    }
+
+    #[test]
+    fn tree_filter_membership_follows_sequence() {
+        // The sequence a client would observe: root starts child1, which
+        // starts child2; "other" and "sub" belong to a different tree.
+        let mut map = ParentMap::new();
+        for edge in [
+            started("root", "child1"),
+            started("child1", "child2"),
+            started("other", "sub"),
+        ] {
+            record_session_relationship(&mut map, &edge);
+        }
+
+        assert!(notification_in_tree(&map, &event("root"), "root"));
+        assert!(notification_in_tree(&map, &event("child1"), "root"));
+        assert!(notification_in_tree(&map, &event("child2"), "root"));
+        assert!(!notification_in_tree(&map, &event("other"), "root"));
+        assert!(!notification_in_tree(&map, &event("unrelated"), "root"));
+
+        // Lifecycle edges pass when the *parent* is in the tree...
+        assert!(notification_in_tree(
+            &map,
+            &started("child1", "child3"),
+            "root"
+        ));
+        assert!(!notification_in_tree(
+            &map,
+            &started("other", "child3"),
+            "root"
+        ));
+        assert!(notification_in_tree(
+            &map,
+            &notification(
+                "subagent.finished",
+                &[
+                    ("parentSessionId", json!("child2")),
+                    ("childSessionId", json!("grandchild")),
+                ],
+            ),
+            "root"
+        ));
+        // ...or when the child session is the root itself.
+        assert!(notification_in_tree(
+            &map,
+            &notification(
+                "subagent.finished",
+                &[
+                    ("parentSessionId", json!("unrelated")),
+                    ("childSessionId", json!("root")),
+                ],
+            ),
+            "root"
+        ));
+
+        // Notifications without a session identity never match.
+        assert!(!notification_in_tree(
+            &map,
+            &notification("session.status", &[]),
+            "root"
+        ));
+        assert!(!notification_in_tree(
+            &map,
+            &notification("subagent.started", &[("parentSessionId", json!(7))],),
+            "root"
+        ));
+    }
+}
