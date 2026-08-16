@@ -16,9 +16,9 @@ use deepseek_harness_sdk::{Config, DeepSeekHarness, Input};
 
 /// One smoke turn: start a harness with a temp `session_root` and default
 /// config, run `Session::run`, and assert **structural** facts only (LLM
-/// output is nondeterministic): a completion-class `finish_reason`, a
-/// non-empty `final_response`, the session ids present, and the configured
-/// `session_root` surfaced.
+/// output is nondeterministic): a success-class `finish_reason`
+/// (`completed`/`max-tokens`), a non-empty `final_response`, the session ids
+/// present, and the configured `session_root` surfaced.
 #[tokio::test]
 async fn real_runtime_smoke() {
     // Runtime gating — read at runtime, not at compile time.
@@ -82,11 +82,16 @@ async fn real_runtime_smoke() {
 
     harness.close().await.expect("clean close");
 
-    // Structural facts only — no assertion on the response text or the exact
-    // reason kind (LLM nondeterminism).
+    // Structural facts only — no assertion on the response text (LLM
+    // nondeterminism). The finish reason must be a success-class kind: a
+    // `turn/end` with kind "error" would not count as a completed turn, and
+    // `is_some()` alone would pass an error-class end.
     assert!(
-        result.finish_reason.is_some(),
-        "expected a completion-class finish_reason, got {:?}",
+        matches!(
+            result.finish_reason.as_deref(),
+            Some("completed" | "max-tokens")
+        ),
+        "expected a success-class finish_reason (completed/max-tokens), got {:?}",
         result.finish_reason
     );
     assert!(

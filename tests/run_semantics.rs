@@ -411,6 +411,41 @@ async fn final_response_concatenates_last_assistant_message_text_blocks() {
 }
 
 #[tokio::test]
+async fn last_assistant_message_with_only_null_text_blocks_yields_empty_response() {
+    let mut script = run_prefix("msg-9");
+    script.extend([
+        emit("session.event", root_event(receipt_event("msg-9"))),
+        // An earlier assistant/message must not win the pointer walk.
+        emit(
+            "session.event",
+            root_event(assistant_event(
+                json!([{"type": "text", "text": "stale-output"}]),
+            )),
+        ),
+        // The last assistant/message has a single text block with
+        // `text: null` — the discriminating case for the literal
+        // "text: null contributes `""`" constraint (a null-only last message
+        // must yield an empty response, not fall back to the earlier text).
+        emit(
+            "session.event",
+            root_event(assistant_event(json!([{"type": "text", "text": null}]))),
+        ),
+        emit("session.event", root_event(turn_end("completed"))),
+        emit("session.status", idle(ROOT_SESSION)),
+        exit(0),
+    ]);
+    let result = run_once(&script, "hello").await.expect("run succeeds");
+
+    assert_eq!(
+        result.final_response, "",
+        "`text: null` contributes \"\" — the last message's only text block \
+         is null, so the response must be empty (no fallback to the earlier \
+         assistant/message)"
+    );
+    assert_eq!(result.finish_reason.as_deref(), Some("completed"));
+}
+
+#[tokio::test]
 async fn prompt_error_propagates_and_client_stays_usable() {
     let script = [
         expect("initialize"),
