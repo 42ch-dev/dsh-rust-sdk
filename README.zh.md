@@ -6,6 +6,8 @@
 [![Language](https://img.shields.io/badge/language-Rust-orange)](Cargo.toml)
 [![crates.io](https://img.shields.io/crates/v/deepseek-harness-sdk)](https://crates.io/crates/deepseek-harness-sdk)
 
+发布历史见 [CHANGELOG](CHANGELOG.md)。
+
 面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 （DSH）运行时的 Rust 客户端 SDK：把官方运行时作为子进程拉起，并讲它的
 stdio JSON-RPC 2.0 协议。一个 crate，两层 API：Python 对齐的高层 API

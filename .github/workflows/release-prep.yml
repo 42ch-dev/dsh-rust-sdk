@@ -1,0 +1,183 @@
+name: Release prep
+
+# Manual entry point (Actions -> "Release prep" -> Run workflow): resolves the
+# release version, assembles `.changes/unreleased/` fragments into CHANGELOG.md,
+# bumps Cargo.toml, archives the consumed fragments, and opens/updates the
+# `release v<version>` PR (label `release`). Merging that PR runs the Release
+# workflow (annotated tag -> verify -> GitHub Release -> crates.io publish via
+# Trusted Publishing OIDC). This workflow never touches `main` directly.
+#
+# Zero registry secrets: no CARGO_REGISTRY_TOKEN anywhere in the pipeline.
+# PR create/update/reopen uses the built-in GITHUB_TOKEN (requires the org
+# setting "Allow GitHub Actions to create and approve pull requests"); a PAT
+# secret is the documented last resort only if the org blocks it — not
+# pre-created, not a crates.io credential.
+#
+# Leave the version input empty for an auto bump (0.1.0-alpha.1 ->
+# 0.1.0-alpha.2) or pass an explicit SemVer (X.Y.Z or X.Y.Z-pre.N).
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Target version (e.g. 0.1.0-alpha.2). Leave empty for an auto bump."
+        required: false
+        type: string
+
+concurrency:
+  group: release-prep
+  cancel-in-progress: false
+
+permissions:
+  contents: write # push the release/v<version> branch
+  pull-requests: write # create/edit/reopen the release PR
+  # gh label create needs the labels API — without issues:write the
+  # ensure-label step silently fails and `gh pr create --label release`
+  # errors with "label 'release' not found" (fallbacks lesson).
+  issues: write
+# No id-token in Release prep: nothing here publishes.
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        # actions/checkout@v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          # Always prepare from main: even a dispatch run with another branch
+          # selected must not leak state from a previous Release prep run.
+          ref: main
+          fetch-depth: 0
+
+      - name: Setup Rust toolchain
+        # dtolnay/rust-toolchain@stable (2026-07-16)
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+
+      - name: Cache Rust dependencies
+        # Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+        with:
+          shared-key: dsh-rust-sdk
+          workspaces: .
+
+      - name: Resolve release version
+        id: ver
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          V="$INPUT_VERSION"
+          if [ -n "$V" ]; then
+            # Validate the input format BEFORE any output use: a multiline/CR
+            # value would inject extra lines into GITHUB_OUTPUT that downstream
+            # steps would read as the version; a malformed value must fail here
+            # instead of after the repo was mutated.
+            case "$V" in
+              *$'\n'* | *$'\r'*)
+                echo "::error::Invalid version \"$V\" (must be a single line)."
+                exit 1
+                ;;
+            esac
+            if ! printf '%s' "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+              echo "::error::Invalid version \"$V\". Expected X.Y.Z or X.Y.Z-pre.N (e.g. 0.1.0-alpha.2)."
+              exit 1
+            fi
+            RESOLVED="$(cargo xtask release-prepare "$V")"
+          else
+            RESOLVED="$(cargo xtask release-prepare --auto)"
+          fi
+          echo "version=${RESOLVED}" >> "$GITHUB_OUTPUT"
+          echo "Resolved release version ${RESOLVED}"
+
+      - name: Validate release version
+        run: cargo xtask release-validate "v${{ steps.ver.outputs.version }}"
+
+      - name: Build (release smoke)
+        run: cargo build
+
+      - name: Extract changelog notes
+        id: notes
+        run: |
+          set -euo pipefail
+          NOTES_FILE="${RUNNER_TEMP}/release-notes-${{ steps.ver.outputs.version }}.md"
+          cargo xtask release-notes "${{ steps.ver.outputs.version }}" > "$NOTES_FILE"
+          # Refuse-empty (T3 review carry): release-notes exits 0 for a
+          # header-only/bulletless section, so additionally require at least
+          # one `- ` bullet line — a release PR with an empty changelog body
+          # is a silent quality regression.
+          if ! grep -Eq '^[[:space:]]*- ' "$NOTES_FILE"; then
+            echo "::error::Changelog section for v${{ steps.ver.outputs.version }} has no bullet lines; refusing to open a release PR."
+            exit 1
+          fi
+          echo "notes_file=${NOTES_FILE}" >> "$GITHUB_OUTPUT"
+
+      - name: Commit prepared release
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          BRANCH="release/v${{ steps.ver.outputs.version }}"
+          # Invariant (qc1-F002): the Checkout step above used `ref: main`
+          # and no fetch happened since, so HEAD == origin/main here — the
+          # prepared working-tree changes (Cargo.toml, CHANGELOG.md,
+          # .changes/) survive `git checkout -B` because it switches to a
+          # branch at the same commit (nothing to reset). Keep HEAD ==
+          # origin/main before this step: changing the startpoint, adding a
+          # fetch, or checking out a different ref would silently discard
+          # the prepare output.
+          git checkout -B "$BRANCH" origin/main
+          # Explicit paths only: the release PR must contain exactly the
+          # version/changelog/fragment changes, never stray files. Cargo.lock
+          # is included because the version bump moves the crate's own
+          # [[package]] entry (regenerated by the build smoke above).
+          git add Cargo.toml CHANGELOG.md .changes/ Cargo.lock
+          git commit -m "chore(release): prepare v${{ steps.ver.outputs.version }}"
+          git push --force-with-lease origin "$BRANCH"
+
+      - name: Ensure release label
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh label create release --description "Release PR - merge to tag and publish" --color 0E8A16 --force
+
+      - name: Open or update release PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          NOTES_FILE: ${{ steps.notes.outputs.notes_file }}
+        run: |
+          set -euo pipefail
+          BRANCH="release/v${VERSION}"
+          TITLE="release v${VERSION}"
+          BODY_FILE="$(mktemp)"
+          {
+            echo "## Release ${VERSION}"
+            echo ""
+            echo "Generated by the **Release prep** workflow. Merging this PR creates annotated tag \`v${VERSION}\` and runs the **Release** workflow: verify -> GitHub Release -> crates.io publish (Trusted Publishing OIDC, tokenless)."
+            echo ""
+            echo "## Changelog"
+            echo ""
+            cat "$NOTES_FILE"
+          } > "$BODY_FILE"
+
+          # State-aware PR handling: an open PR is updated; a closed PR is
+          # reopened first (`gh pr edit` silently keeps closed PRs closed — a
+          # re-run after rollback would otherwise look successful while leaving
+          # no open PR); none -> create. `gh pr reopen` fails loudly on a
+          # merged PR instead of silently leaving the release blocked.
+          OPEN_NUM="$(gh pr list --head "$BRANCH" --state open --json number -q '.[0].number' 2>/dev/null || true)"
+          if [ -n "$OPEN_NUM" ]; then
+            gh pr edit "$OPEN_NUM" --title "$TITLE" --body-file "$BODY_FILE" --add-label release
+            echo "Updated existing open release PR #${OPEN_NUM} for ${BRANCH}"
+            exit 0
+          fi
+
+          CLOSED_NUM="$(gh pr list --head "$BRANCH" --state closed --json number -q '.[0].number' 2>/dev/null || true)"
+          if [ -n "$CLOSED_NUM" ]; then
+            gh pr reopen "$CLOSED_NUM"
+            gh pr edit "$CLOSED_NUM" --title "$TITLE" --body-file "$BODY_FILE" --add-label release
+            echo "Reopened release PR #${CLOSED_NUM} for ${BRANCH}"
+          else
+            gh pr create --base main --head "$BRANCH" --title "$TITLE" --body-file "$BODY_FILE" --label release
+            echo "Created release PR for ${BRANCH}"
+          fi
