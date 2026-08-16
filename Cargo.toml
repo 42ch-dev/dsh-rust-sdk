@@ -1,0 +1,15 @@
+[package]
+name = "deepseek-harness-sdk"
+version = "0.1.0"
+edition = "2021"
+description = "Low-level Rust client for the DeepSeek Harness runtime stdio JSON-RPC 2.0 protocol"
+license = "Apache-2.0"
+
+[dependencies]
+tokio = { version = "1", features = ["process", "io-util", "time", "sync", "rt-multi-thread", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[lints.rust]
+unsafe_code = "forbid"
