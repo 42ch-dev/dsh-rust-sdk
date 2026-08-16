@@ -3,7 +3,7 @@
 //!
 //! This module layers the Python SDK's `Session::run` activity-interval
 //! algorithm on the low-level
-//! [`HarnessClient`](crate::client::HarnessClient): subscribe to the session
+//! [`HarnessClient`]: subscribe to the session
 //! tree, send `session/prompt`, wait for the durable `agent/inbox/spliced`
 //! receipt of the returned message id, collect every tree notification until
 //! the **root** session reports `idle`, then derive
@@ -34,7 +34,7 @@ use crate::runtime::{compose_env, resolve_runtime, Config};
 /// A running DeepSeek Harness instance, Python `DeepSeekHarness` parity.
 ///
 /// Owns the spawned runtime child (via the low-level
-/// [`HarnessClient`](crate::client::HarnessClient)) behind an async mutex:
+/// [`HarnessClient`]) behind an async mutex:
 /// sessions created by [`DeepSeekHarness::start_session`] may run
 /// concurrently, interleaving at the `session/prompt` write and then waiting
 /// on their own subscriptions.
