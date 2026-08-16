@@ -179,10 +179,44 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Drain the pending map into transport-closed errors (used by the read loop
-/// when stdout closes).
+/// Register a pending request, failing fast when the client closed or died
+/// since the caller's fast-fail check.
+///
+/// The closed-flag check and the insert are one state-lock critical section
+/// (state → pending, the same order as the read loop's EOF drain in
+/// [`fail_all_pending`]), so a drain that happened between the caller's
+/// check and this call cannot strand the request: either the insert lands
+/// before the drain (covered by it) or the drain ran first and the check
+/// here observes the closed flag and fails fast. Returns `None` when
+/// registered, or the transport-closed error to fail fast with.
+fn try_register_pending(
+    pending: &PendingMap,
+    state: &Mutex<SharedState>,
+    id: String,
+    tx: oneshot::Sender<Result<Value, Error>>,
+) -> Option<Error> {
+    let st = lock(state);
+    if st.closed || st.exit_code.is_some() {
+        return Some(closed_error(&st, "DeepSeek Harness runtime is not running"));
+    }
+    lock(pending).insert(id, tx);
+    None
+}
+
+/// Drain the pending map into transport-closed errors, marking the client
+/// closed in the same critical section (used by the read loop when stdout
+/// closes).
+///
+/// The closed flag and the drain are one state-lock critical section, so a
+/// request that observed not-closed and registered (its insert takes the
+/// state lock first, same order) is always covered: either it inserted
+/// before this drain (resolved here) or this drain ran first and its
+/// re-check in [`try_register_pending`] observes the closed flag and fails
+/// fast. No interleaving strands a request after the drain.
 fn fail_all_pending(pending: &PendingMap, state: &Mutex<SharedState>, reason: &str) {
     let senders: Vec<_> = {
+        let mut st = lock(state);
+        st.closed = true;
         let mut pending = lock(pending);
         pending.drain().map(|(_id, tx)| tx).collect()
     };
@@ -236,6 +270,63 @@ mod tests {
         assert!(
             embedded.ends_with(&"z".repeat(MAX_EMBEDDED_STDERR_BYTES)),
             "the truncated tail must keep the newest bytes"
+        );
+    }
+
+    #[test]
+    fn eof_drain_marks_closed_in_the_same_critical_section_as_the_drain() {
+        // The read loop used to drain pending and only then set `closed`, so
+        // a request that passed the fast-fail check before the drain could
+        // insert *after* it and wait forever (default request_timeout:
+        // None). The drain now marks the client closed under the state lock
+        // while draining: the in-flight waiter is resolved, and any request
+        // that would register after the drain observes the flag.
+        let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
+        let state = Arc::new(Mutex::new(SharedState::default()));
+
+        // A request that is in flight when the runtime's stdout closes.
+        let (tx, mut rx) = oneshot::channel();
+        lock(&pending).insert("in-flight".to_string(), tx);
+
+        fail_all_pending(&pending, &state, "DeepSeek Harness runtime stdout closed");
+
+        assert!(
+            matches!(rx.try_recv(), Ok(Err(Error::TransportClosed(_)))),
+            "the in-flight request must be resolved by the drain"
+        );
+        assert!(
+            lock(&state).closed,
+            "closed must already be set once the drain completes — a post-drain registration must fail fast, not hang"
+        );
+    }
+
+    #[test]
+    fn request_insert_after_eof_drain_fails_fast_instead_of_hanging() {
+        // The exact old race, deterministically: a request passes the
+        // fast-fail check while the runtime is healthy, then the read loop
+        // hits EOF and drains (nothing pending), then the request registers.
+        // With the closed flag + drain now one critical section and the
+        // insert paired with a closed re-check, the late registration fails
+        // fast instead of inserting a waiter that nothing will ever resolve.
+        let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
+        let state = Arc::new(Mutex::new(SharedState::default()));
+
+        assert!(!lock(&state).closed, "the fast-fail check passes");
+
+        fail_all_pending(&pending, &state, "DeepSeek Harness runtime stdout closed");
+        assert!(lock(&state).closed, "EOF drain marks the client closed");
+
+        let (tx, mut rx) = oneshot::channel();
+        let err = try_register_pending(&pending, &state, "late".to_string(), tx)
+            .expect("a post-drain registration must fail fast, not hang");
+        assert!(matches!(err, Error::TransportClosed(_)));
+        assert!(
+            lock(&pending).is_empty(),
+            "no stranded pending entry may be left behind"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "the sender was dropped unresolved — the request failed fast instead of waiting"
         );
     }
 

@@ -81,12 +81,15 @@ pub(super) async fn read_loop(
     tokio::time::timeout(TASK_JOIN_GRACE, ctx.stderr_done.notified())
         .await
         .ok();
+    // Mark closed and drain in one state-lock critical section
+    // (`fail_all_pending` sets the flag itself): a request that observed
+    // not-closed and registered is covered by this drain, and one that
+    // would register after it sees the closed flag and fails fast.
     fail_all_pending(
         &ctx.pending,
         &ctx.state,
         "DeepSeek Harness runtime stdout closed",
     );
-    lock(&ctx.state).closed = true;
 }
 
 /// Dispatch one parsed frame: response / client-directed request /

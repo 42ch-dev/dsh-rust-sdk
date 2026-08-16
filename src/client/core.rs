@@ -24,7 +24,10 @@ use crate::transport::{write_frame, JsonRpcLineTransport};
 use super::read_loop::{read_loop, stderr_loop, ReadContext};
 use super::session_tree::ParentMap;
 use super::subscription::NotificationSubscription;
-use super::{closed_error, lock, PendingRequests, SharedState, DEFAULT_BROADCAST_CAPACITY};
+use super::{
+    closed_error, lock, try_register_pending, PendingRequests, SharedState,
+    DEFAULT_BROADCAST_CAPACITY,
+};
 
 /// How to launch the runtime process (the official
 /// `deepseek-harness-sdk-runtime` binary).
@@ -245,8 +248,15 @@ impl HarnessClient {
         let id = Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
         // Register before writing so a response that races the write is not
-        // dropped as an unknown id (reference parity).
-        lock(&self.pending).insert(id.clone(), tx);
+        // dropped as an unknown id (reference parity). The insert is paired
+        // with a closed-flag re-check under the state lock (same lock order
+        // as the read loop's EOF drain), so a runtime death between the
+        // fast-fail check above and this insert cannot strand the request:
+        // either the insert lands before the drain (covered by it) or the
+        // drain ran first and the check here fails fast.
+        if let Some(err) = try_register_pending(&self.pending, &self.state, id.clone(), tx) {
+            return Err(err);
+        }
 
         let frame = json!({
             "jsonrpc": "2.0",
