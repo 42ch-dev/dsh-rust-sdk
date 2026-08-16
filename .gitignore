@@ -25,6 +25,7 @@ target
 # Default-ignore everything under .mstar/, then re-include the tracked results.
 .mstar/**
 !.mstar/AGENTS.md
+!.mstar/roadmap.md
 !.mstar/knowledge/
 !.mstar/knowledge/**
 !.mstar/specs/
