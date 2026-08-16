@@ -117,9 +117,14 @@ where
             let newline = buf.iter().position(|&b| b == b'\n');
             let content = newline.unwrap_or(buf.len());
             if self.read_buf.len() + content > MAX_LINE_LEN {
+                // `content` is the whole chunk when the line has no newline
+                // in it, so `observed` is a lower bound on the true length;
+                // when the newline is in this chunk it is exact.
+                let observed = self.read_buf.len() + content;
                 return Err(Error::SdkProtocol {
                     message: format!(
-                        "incoming line exceeds {MAX_LINE_LEN} bytes (16 MiB framing guard)"
+                        "incoming line exceeds {MAX_LINE_LEN} bytes (16 MiB framing guard), \
+                         observed {observed} bytes so far"
                     ),
                 });
             }
@@ -279,8 +284,102 @@ mod tests {
             err.is_protocol(),
             "framing guard must be an SdkProtocol error"
         );
+        // FIX-10: the guard error names the observed length so callers can
+        // distinguish a slightly-over line from a runaway one.
+        let message = err.to_string();
+        assert!(
+            message.contains("observed"),
+            "guard error must report the observed length, got: {message}"
+        );
+        let observed = message
+            .split("observed ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|n| n.parse::<usize>().ok())
+            .expect("observed length must be numeric");
+        assert!(
+            observed > MAX_LINE_LEN,
+            "observed length {observed} must exceed the guard"
+        );
 
         drop(transport);
         writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn line_exactly_at_limit_reads_successfully() {
+        // FIX-10: the framing guard trips only *over* MAX_LINE_LEN; a line
+        // of exactly the limit is accepted, and a valid JSON document at the
+        // exact boundary still round-trips.
+        let (client_rx, mut server_tx) = duplex(64);
+        let (client_tx, _server_rx) = duplex(64);
+        let mut transport = JsonRpcLineTransport::new(client_rx, client_tx);
+
+        // A JSON string literal whose line totals exactly MAX_LINE_LEN bytes:
+        // 2 quotes + (MAX_LINE_LEN - 2) payload bytes + trailing newline.
+        let payload_len = MAX_LINE_LEN - 2;
+        let writer = tokio::spawn(async move {
+            server_tx.write_all(b"\"").await.unwrap();
+            server_tx.write_all(&vec![b'a'; payload_len]).await.unwrap();
+            server_tx.write_all(b"\"\n").await.unwrap();
+        });
+
+        let frame = transport
+            .read_frame()
+            .await
+            .unwrap()
+            .expect("a line exactly at the limit must be accepted");
+        assert_eq!(
+            frame.as_str().map(str::len),
+            Some(payload_len),
+            "the parsed value must be the full boundary-length string"
+        );
+        writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn partial_line_at_eof_is_reported() {
+        // FIX-10: a valid partial line without a trailing newline at EOF is
+        // still delivered (readline parity), then the stream reports EOF.
+        let (client_rx, mut server_tx) = duplex(64);
+        let (client_tx, _server_rx) = duplex(64);
+        let mut transport = JsonRpcLineTransport::new(client_rx, client_tx);
+
+        server_tx
+            .write_all(b"{\"id\":9,\"result\":\"partial\"}")
+            .await
+            .unwrap();
+        drop(server_tx);
+
+        let frame = transport
+            .read_frame()
+            .await
+            .unwrap()
+            .expect("a partial valid line at EOF must be delivered");
+        assert_eq!(frame, json!({"id": 9, "result": "partial"}));
+        assert!(
+            transport.read_frame().await.unwrap().is_none(),
+            "after the partial line the stream is at EOF"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_partial_line_at_eof_is_skipped() {
+        // FIX-10: a malformed partial line at EOF is skipped like any other
+        // malformed line, and the stream then reports EOF.
+        let (client_rx, mut server_tx) = duplex(64);
+        let (client_tx, _server_rx) = duplex(64);
+        let mut transport = JsonRpcLineTransport::new(client_rx, client_tx);
+
+        server_tx
+            .write_all(b"not json without newline")
+            .await
+            .unwrap();
+        drop(server_tx);
+
+        assert!(
+            transport.read_frame().await.unwrap().is_none(),
+            "a malformed partial line at EOF is skipped, then EOF"
+        );
     }
 }

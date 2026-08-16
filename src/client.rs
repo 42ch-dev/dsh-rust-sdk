@@ -1355,7 +1355,7 @@ mod tests {
         let mut single = ParentMap::new();
         single.insert("child".into(), "parent-1".into());
         single.insert("child".into(), "parent-2".into());
-        assert_eq!(single.len(), 1);
+        assert_eq!(single.edges.len(), 1);
         assert_eq!(single.get("child").map(String::as_str), Some("parent-2"));
     }
 
