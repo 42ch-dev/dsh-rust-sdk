@@ -212,18 +212,29 @@ async fn session_tree_fanout_reaches_only_root_and_child_in_order() {
 
 #[tokio::test]
 async fn descendant_discovered_mid_stream_passes_filter() {
+    // Deterministic by construction (FIX-4): no wall-clock window. The peer
+    // emits the pre-edge child event, then a root "sentinel" event that
+    // follows it in transport order — receiving the sentinel proves the
+    // filter already consumed and dropped the pre-edge event while the child
+    // was not yet in the tree. The peer then blocks on a marker
+    // `session/prompt`; only after the test sends it does the peer emit the
+    // `subagent.started` edge and the post-edge event, so the ordering is
+    // enforced by the wire, never by sleep timing.
     let mut rt = FakeRuntime::spawn(&[
         expect("initialize"),
         respond(server_info_result()),
-        // Emitted before the parent edge is known; the peer then sleeps so
-        // the subscriber drains this event while the tree is still just
-        // `root` (the filter is receive-time against the live edge map).
         emit(
             "session.event",
             json!({"sessionId": CHILD_SESSION, "event": {"type": "test", "text": "before-edge"}}),
         ),
-        sleep_ms(500),
-        // The edge arrives mid-stream; from here on child events pass.
+        emit(
+            "session.event",
+            json!({"sessionId": ROOT_SESSION, "event": {"type": "test", "text": "sentinel"}}),
+        ),
+        // Marker: the peer answers it, and only then emits the edge and the
+        // post-edge event.
+        expect("session/prompt"),
+        respond(json!({"messageId": "marker-1"})),
         emit(
             "subagent.started",
             json!({"parentSessionId": ROOT_SESSION, "childSessionId": CHILD_SESSION}),
@@ -232,20 +243,41 @@ async fn descendant_discovered_mid_stream_passes_filter() {
             "session.event",
             json!({"sessionId": CHILD_SESSION, "event": {"type": "test", "text": "after-edge"}}),
         ),
+        // Keep the peer alive for the final no-more-events probe.
+        sleep_ms(1000),
     ])
     .expect("spawn fake runtime");
 
     let mut subscription = rt.client.subscribe_session_tree(ROOT_SESSION);
     initialize_ok(&mut rt).await;
 
-    // While the peer sleeps, `child` is not yet in the tree: the pre-edge
-    // child event is consumed and dropped by the filter.
-    let quiet = tokio::time::timeout(Duration::from_millis(200), subscription.recv()).await;
-    if let Ok(Ok(notification)) = quiet {
-        panic!("pre-edge child event leaked: {notification:?}");
-    }
+    // The root sentinel follows the pre-edge child event in transport order;
+    // receiving it proves the pre-edge event was drained and dropped by the
+    // filter while the edge map was still empty (the peer is still blocked
+    // on the marker below).
+    let sentinel = subscription
+        .recv()
+        .await
+        .expect("root sentinel delivered");
+    assert_eq!(sentinel.method, "session.event");
+    assert_eq!(
+        sentinel
+            .payload
+            .get("event")
+            .and_then(|e| e.get("text"))
+            .and_then(Value::as_str),
+        Some("sentinel")
+    );
 
-    // After the mid-stream edge, the subsequent child event passes.
+    // Unblock the peer; the edge and the post-edge event now arrive in wire
+    // order.
+    let message_id = rt
+        .client
+        .session_prompt("sess-1", vec![ContentBlock::Text { text: "sync".into() }])
+        .await
+        .expect("marker prompt answered");
+    assert_eq!(message_id, "marker-1");
+
     let started = subscription
         .recv()
         .await
@@ -258,7 +290,10 @@ async fn descendant_discovered_mid_stream_passes_filter() {
         .expect("post-edge child event delivered");
     assert_eq!(after_edge.method, "session.event");
     assert_eq!(
-        after_edge.payload.get("sessionId").and_then(|v| v.as_str()),
+        after_edge
+            .payload
+            .get("sessionId")
+            .and_then(Value::as_str),
         Some(CHILD_SESSION)
     );
     assert_eq!(
@@ -266,7 +301,7 @@ async fn descendant_discovered_mid_stream_passes_filter() {
             .payload
             .get("event")
             .and_then(|e| e.get("text"))
-            .and_then(|v| v.as_str()),
+            .and_then(Value::as_str),
         Some("after-edge"),
         "the post-edge child event must be the one delivered, not the pre-edge one"
     );

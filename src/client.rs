@@ -361,27 +361,19 @@ impl HarnessClient {
         let stdin_shared = Arc::new(tokio::sync::Mutex::new(stdin));
         let child_shared = Arc::new(tokio::sync::Mutex::new(child));
 
-        let read_stdin = Arc::downgrade(&stdin_shared);
-        let read_child = Arc::downgrade(&child_shared);
-        let read_pending = Arc::clone(&pending);
-        let read_parent_map = Arc::clone(&parent_map);
-        let read_state = Arc::clone(&state);
-        let read_notifications = notifications.clone();
         let stderr_done = Arc::new(Notify::new());
-        let read_stderr_done = Arc::clone(&stderr_done);
+        let read_ctx = ReadContext {
+            stdin: Arc::downgrade(&stdin_shared),
+            child: Arc::downgrade(&child_shared),
+            pending: Arc::clone(&pending),
+            parent_map: Arc::clone(&parent_map),
+            notifications: notifications.clone(),
+            state: Arc::clone(&state),
+            stderr_done: Arc::clone(&stderr_done),
+        };
         let read_task = tokio::spawn(async move {
             let transport = JsonRpcLineTransport::new(stdout, tokio::io::sink());
-            read_loop(
-                transport,
-                read_stdin,
-                read_child,
-                read_pending,
-                read_parent_map,
-                read_notifications,
-                read_state,
-                read_stderr_done,
-            )
-            .await;
+            read_loop(transport, read_ctx).await;
         });
 
         let stderr_state = Arc::clone(&state);
@@ -829,22 +821,43 @@ fn fail_all_pending(pending: &PendingMap, state: &Mutex<SharedState>, reason: &s
     }
 }
 
+/// The read loop's shared context: every client handle it needs to dispatch
+/// frames and to resolve the pending map (and its own state) on EOF.
+struct ReadContext {
+    /// Weak stdin handle — the read loop answers client-directed requests;
+    /// the client's owned handle keeps the pipe open.
+    stdin: Weak<tokio::sync::Mutex<ChildStdin>>,
+    /// Weak child handle — polled once on EOF for the exit code.
+    child: Weak<tokio::sync::Mutex<Child>>,
+    /// In-flight requests by request id.
+    pending: PendingRequests,
+    /// The client-side session-tree edge map.
+    parent_map: Arc<Mutex<ParentMap>>,
+    /// Notification producer fanned out to subscriptions.
+    notifications: broadcast::Sender<Notification>,
+    /// Shared client state (exit code, closed flag, stderr tail).
+    state: Arc<Mutex<SharedState>>,
+    /// Signalled when the captured stderr stream has fully drained.
+    stderr_done: Arc<Notify>,
+}
+
 /// The read loop: owns stdout, dispatches frames, and terminates the pending
 /// map when the transport closes.
 async fn read_loop(
     mut transport: JsonRpcLineTransport<ChildStdout, tokio::io::Sink>,
-    stdin: Weak<tokio::sync::Mutex<ChildStdin>>,
-    child: Weak<tokio::sync::Mutex<Child>>,
-    pending: PendingRequests,
-    parent_map: Arc<Mutex<ParentMap>>,
-    notifications: broadcast::Sender<Notification>,
-    state: Arc<Mutex<SharedState>>,
-    stderr_done: Arc<Notify>,
+    ctx: ReadContext,
 ) {
     loop {
         match transport.read_frame().await {
             Ok(Some(frame)) => {
-                dispatch_frame(frame, &pending, &parent_map, &notifications, &stdin).await
+                dispatch_frame(
+                    frame,
+                    &ctx.pending,
+                    &ctx.parent_map,
+                    &ctx.notifications,
+                    &ctx.stdin,
+                )
+                .await
             }
             Ok(None) => break, // EOF: the runtime's stdout closed.
             Err(err) => {
@@ -857,10 +870,10 @@ async fn read_loop(
     // exit code (plan contract: EOF resolves pending with exit code +
     // stderr tail). The child lock may be held by the close ladder or the
     // child may already have been waited on — skip silently either way.
-    if let Some(child) = child.upgrade() {
+    if let Some(child) = ctx.child.upgrade() {
         if let Ok(mut guard) = child.try_lock() {
             if let Ok(Some(status)) = guard.try_wait() {
-                lock(&state).exit_code = status.code();
+                lock(&ctx.state).exit_code = status.code();
             }
         }
     }
@@ -868,11 +881,11 @@ async fn read_loop(
     // EOF-path error embeds the complete captured tail. When the process
     // died (the common EOF case) the pipe closes immediately; the bound
     // only guards a grandchild keeping stderr open after stdout closed.
-    tokio::time::timeout(TASK_JOIN_GRACE, stderr_done.notified())
+    tokio::time::timeout(TASK_JOIN_GRACE, ctx.stderr_done.notified())
         .await
         .ok();
-    fail_all_pending(&pending, &state, "DeepSeek Harness runtime stdout closed");
-    lock(&state).closed = true;
+    fail_all_pending(&ctx.pending, &ctx.state, "DeepSeek Harness runtime stdout closed");
+    lock(&ctx.state).closed = true;
 }
 
 /// Dispatch one parsed frame: response / client-directed request /
