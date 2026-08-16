@@ -391,6 +391,7 @@ impl HarnessClient {
             parent_map: Arc::clone(&self.parent_map),
             state: Arc::clone(&self.state),
             root: root.to_string(),
+            lagged: false,
         }
     }
 }

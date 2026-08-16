@@ -26,7 +26,9 @@ use std::path::PathBuf;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::client::{HarnessClient, LaunchSpec};
+use crate::client::{
+    HarnessClient, LaunchSpec, NotificationSubscription, DEFAULT_BROADCAST_CAPACITY,
+};
 use crate::error::Error;
 use crate::protocol::{ContentBlock, Notification};
 use crate::runtime::{compose_env, resolve_runtime, Config};
@@ -58,6 +60,11 @@ impl DeepSeekHarness {
     /// [`Config::request_timeout`] bounds every request, including
     /// `session/prompt`; `None` (the default) waits indefinitely.
     ///
+    /// A failure to extract or verify the bundled default `cordis.yml`
+    /// (when no effective `DSH_CORDIS_CONFIG` exists) propagates as
+    /// [`Error::Io`] — the required default-config injection never degrades
+    /// silently to a config-less launch.
+    ///
     /// On `initialize` failure the close ladder is run before the error
     /// propagates, so the spawned child is never leaked (Python parity).
     pub async fn start(config: Config) -> Result<Self, Error> {
@@ -69,7 +76,7 @@ impl DeepSeekHarness {
         let spec = LaunchSpec {
             program: launch.program,
             args: launch.args,
-            envs: compose_env(&config, &cwd).into_iter().collect(),
+            envs: compose_env(&config, &cwd)?.into_iter().collect(),
             cwd: Some(config.runtime_cwd.clone().unwrap_or_else(|| cwd.clone())),
         };
         // `Config::request_timeout` is the Python-parity request deadline
@@ -155,9 +162,33 @@ impl Session<'_> {
     /// descendants, incl. `session.status` / `subagent.*`) in transport
     /// order.
     ///
-    /// The wait-for-idle interval is **unbounded** (Python parity): only the
-    /// `session/prompt` request is bounded by `request_timeout`. Callers
-    /// needing a bound should wrap this call in `tokio::time::timeout`.
+    /// The wait-for-receipt interval (Phase 1) and the wait-for-idle interval
+    /// (Phase 2) are **both unbounded** (Python parity): only the
+    /// `session/prompt` request is bounded by [`Config::request_timeout`].
+    /// Callers needing a bound should wrap this call in
+    /// `tokio::time::timeout`.
+    ///
+    /// # Bounded notification buffer
+    ///
+    /// Tree notifications travel a broadcast channel capped at
+    /// `DEFAULT_BROADCAST_CAPACITY` (4096) with documented drop-oldest
+    /// behavior. If a high-volume tree floods more notifications than fit
+    /// between this call's reads, the dropped set can include the inbox
+    /// receipt or the root-idle notification this run depends on; rather
+    /// than hang forever or return a silently truncated result, the run then
+    /// fails fast with [`Error::SdkProtocol`]. A caller expecting very large
+    /// bursts can bypass this cap only by using the low-level
+    /// [`HarnessClient::spawn_with_broadcast_capacity`] instead of
+    /// [`DeepSeekHarness::start`].
+    ///
+    /// # Malformed payloads
+    ///
+    /// A `session.event` / `session.status` notification whose payload does
+    /// not match the wire shape fails the run with [`Error::SdkProtocol`]
+    /// (the payload is logged). The Python SDK raises when it touches a
+    /// malformed notification; Rust surfaces the same condition as a typed
+    /// error instead of silently dropping an event or misreading the idle
+    /// termination.
     pub async fn run(&self, input: Input) -> Result<RunResult, Error> {
         let content_blocks = match input {
             Input::Text(text) => vec![ContentBlock::Text { text }],
@@ -181,11 +212,33 @@ impl Session<'_> {
         // `notifications` (Python parity).
         let receipt = loop {
             let notification = subscription.recv().await?;
+            ensure_no_lag(&mut subscription)?;
             let is_receipt = match notification.session_event() {
                 Some(Ok(event)) => {
                     event.session_id == *root && is_inbox_receipt(&event.event, &message_id)
                 }
-                _ => false,
+                Some(Err(err)) => {
+                    // The notification IS a session.event but its payload is
+                    // malformed. It could be the receipt itself — a silent
+                    // skip would hang the run forever (the receipt never
+                    // matches) — so fail visibly with the payload logged
+                    // (Python raises on malformed notifications).
+                    tracing::warn!(
+                        error = %err,
+                        method = %notification.method,
+                        payload = ?notification.payload,
+                        "malformed session.event during the receipt wait; \
+                         Python raises on malformed notifications, Rust fails \
+                         with SdkProtocol"
+                    );
+                    return Err(Error::SdkProtocol {
+                        message: format!(
+                            "malformed session.event during Session::run (the \
+                             inbox receipt could not be confirmed): {err}"
+                        ),
+                    });
+                }
+                None => false, // not a session.event (status / subagent.*)
             };
             if is_receipt {
                 break notification;
@@ -199,20 +252,63 @@ impl Session<'_> {
         let mut notifications = Vec::new();
         let mut notification = receipt;
         loop {
-            if let Some(Ok(event)) = notification.session_event() {
-                if event.session_id == *root && event.event.is_object() {
-                    events.push(event.event);
+            match notification.session_event() {
+                Some(Ok(event)) => {
+                    if event.session_id == *root && event.event.is_object() {
+                        events.push(event.event);
+                    }
                 }
+                Some(Err(err)) => {
+                    // A malformed session.event cannot be classified as root
+                    // (or child); it would silently vanish from `events`
+                    // while still present in `notifications`. Fail visibly
+                    // (Python raises on malformed notifications).
+                    tracing::warn!(
+                        error = %err,
+                        method = %notification.method,
+                        payload = ?notification.payload,
+                        "malformed session.event during the collection phase; \
+                         Python raises on malformed notifications, Rust fails \
+                         with SdkProtocol"
+                    );
+                    return Err(Error::SdkProtocol {
+                        message: format!(
+                            "malformed session.event during Session::run (the \
+                             event could not be collected): {err}"
+                        ),
+                    });
+                }
+                None => {}
             }
-            let root_idle = matches!(
-                notification.session_status(),
-                Some(Ok(status)) if status.session_id == *root && status.status == "idle"
-            );
+            let root_idle = match notification.session_status() {
+                Some(Ok(status)) => status.session_id == *root && status.status == "idle",
+                Some(Err(err)) => {
+                    // A malformed session.status could be the root idle
+                    // notification — a silent skip would hang the run
+                    // forever. Fail visibly.
+                    tracing::warn!(
+                        error = %err,
+                        method = %notification.method,
+                        payload = ?notification.payload,
+                        "malformed session.status during Session::run; Python \
+                         raises on malformed notifications, Rust fails with \
+                         SdkProtocol"
+                    );
+                    return Err(Error::SdkProtocol {
+                        message: format!(
+                            "malformed session.status during Session::run (the \
+                             root idle state could not be determined): {err}"
+                        ),
+                    });
+                }
+                None => false,
+            };
             notifications.push(notification);
             if root_idle {
                 break;
             }
             notification = subscription.recv().await?;
+            ensure_no_lag(&mut subscription)?;
         }
 
         let finish_reason = extract_finish_reason(&events)?;
@@ -226,6 +322,25 @@ impl Session<'_> {
             session_root: self.harness.session_root.clone(),
         })
     }
+}
+
+/// Fail the run when the notification subscription has fallen behind the
+/// broadcast capacity: dropped notifications are irrecoverable, and the
+/// dropped set can include the inbox receipt or the root-idle notification,
+/// so the run cannot be trusted (and might otherwise hang forever).
+fn ensure_no_lag(subscription: &mut NotificationSubscription) -> Result<(), Error> {
+    if subscription.take_lagged() {
+        return Err(Error::SdkProtocol {
+            message: format!(
+                "the notification subscription fell behind the \
+                 {DEFAULT_BROADCAST_CAPACITY}-notification broadcast buffer and \
+                 dropped notifications; the inbox receipt or root-idle \
+                 notification may have been lost, so this run's result cannot \
+                 be trusted"
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// A user turn for [`Session::run`], mirroring Python's `normalize_input`.
@@ -245,9 +360,10 @@ pub struct RunResult {
     /// The SDK session id this turn ran on.
     pub session_id: String,
     /// Text concatenation of the **last** root `assistant/message` event's
-    /// text blocks (`text: null` blocks contribute `""`); `""` when the
-    /// activity interval contains no `assistant/message` — or the last one
-    /// has no text blocks. Never falls back to an earlier event.
+    /// text blocks (`text: null` or a non-string `text` contributes `""`);
+    /// `""` when the activity interval contains no `assistant/message` — or
+    /// the last one has no text blocks. Never falls back to an earlier
+    /// event.
     pub final_response: String,
     /// The last root `turn/end` event's `data.reason.kind` inside the
     /// activity interval (`None` when the window has no `turn/end`).
@@ -287,7 +403,9 @@ pub fn extract_finish_reason(events: &[Value]) -> Result<Option<String>, Error> 
 
 /// Python `final_response` verbatim: the last root `assistant/message`
 /// event's text-block concatenation; `""` when absent or textless (never
-/// falls back to an earlier event).
+/// falls back to an earlier event). Blocks with `type == "text"` contribute
+/// their string `text`; `text: null` (or a non-string `text`) contributes
+/// `""` (Python parity).
 fn derive_final_response(events: &[Value]) -> String {
     let Some(last) = events
         .iter()
@@ -308,12 +426,8 @@ fn derive_final_response(events: &[Value]) -> String {
     };
     blocks
         .iter()
-        .filter_map(|block| {
-            if block.get("type").and_then(Value::as_str) != Some("text") {
-                return None;
-            }
-            block.get("text").and_then(Value::as_str)
-        })
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+        .map(|block| block.get("text").and_then(Value::as_str).unwrap_or(""))
         .collect()
 }
 

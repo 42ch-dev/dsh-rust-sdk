@@ -43,7 +43,12 @@ use crate::error::Error;
 /// receiver falls more than this many notifications behind, the oldest are
 /// dropped and the receiver observes `Lagged(n)` — documented drop-oldest
 /// behavior, matching the bounded queues of the reference clients.
-const DEFAULT_BROADCAST_CAPACITY: usize = 4096;
+///
+/// `pub(crate)` so the high-level [`Session::run`](crate::Session::run)
+/// activity interval can cite the boundary when it fails fast on a lag
+/// (dropped notifications can include the inbox receipt or the root-idle
+/// notification this run depends on).
+pub(crate) const DEFAULT_BROADCAST_CAPACITY: usize = 4096;
 
 /// Retained stderr lines used to diagnose an unexpected runtime death
 /// (Python `deque(maxlen=400)` / TS `STDERR_TAIL_LIMIT = 400` parity).
