@@ -146,3 +146,86 @@ fn drain_queued(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{json, Map, Value};
+    use tokio::sync::broadcast;
+
+    use super::*;
+
+    /// A root-session `session.event` notification payload.
+    fn event_notification(text: &str) -> Notification {
+        let mut payload = Map::new();
+        payload.insert("sessionId".to_string(), json!("root"));
+        payload.insert("event".to_string(), json!({"type": "test", "text": text}));
+        Notification {
+            method: "session.event".to_string(),
+            payload,
+        }
+    }
+
+    /// A subscription over a fresh broadcast channel of `capacity`, with an
+    /// empty tree (the root always passes the filter) and a live client
+    /// state.
+    fn subscription_with_capacity(
+        capacity: usize,
+    ) -> (broadcast::Sender<Notification>, NotificationSubscription) {
+        let (tx, rx) = broadcast::channel(capacity);
+        let subscription = NotificationSubscription {
+            receiver: Some(rx),
+            parent_map: Arc::new(Mutex::new(ParentMap::default())),
+            state: Arc::new(Mutex::new(SharedState::default())),
+            root: "root".to_string(),
+            lagged: false,
+        };
+        (tx, subscription)
+    }
+
+    #[tokio::test]
+    async fn overflow_sets_lagged_and_take_lagged_consumes_it() {
+        // Capacity 1: the second send evicts the first, so the receiver
+        // falls behind by exactly one notification — the low-level overflow
+        // `Session::run`'s `ensure_no_lag` fail-fast protects against.
+        let (tx, mut subscription) = subscription_with_capacity(1);
+
+        tx.send(event_notification("first")).expect("send");
+        tx.send(event_notification("second")).expect("send");
+
+        // recv() surfaces the Lagged (recording it on the flag) and still
+        // delivers the retained notification.
+        let notification = subscription
+            .recv()
+            .await
+            .expect("the retained notification is delivered");
+        assert_eq!(
+            notification
+                .payload
+                .get("event")
+                .and_then(|e| e.get("text"))
+                .and_then(Value::as_str),
+            Some("second"),
+            "the first notification was dropped; the second is delivered"
+        );
+        assert!(subscription.lagged, "an overflow must set the lag flag");
+        assert!(
+            subscription.take_lagged(),
+            "take_lagged reports the recorded lag"
+        );
+        assert!(
+            !subscription.take_lagged(),
+            "take_lagged is consumed on read until the next lag"
+        );
+
+        // A stream that keeps up after the lag leaves the flag clear.
+        tx.send(event_notification("third")).expect("send");
+        subscription
+            .recv()
+            .await
+            .expect("the third notification is delivered");
+        assert!(
+            !subscription.take_lagged(),
+            "no overflow since the last read → the flag stays clear"
+        );
+    }
+}

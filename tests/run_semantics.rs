@@ -500,3 +500,144 @@ async fn prompt_error_propagates_and_client_stays_usable() {
 
     h.close().await.expect("clean close");
 }
+
+#[tokio::test]
+async fn malformed_session_event_during_receipt_wait_fails_fast() {
+    // Phase 1: the first session.event could be the receipt itself. The
+    // payload keeps a valid `sessionId` (so the tree filter admits it) but
+    // drops the required `event` field, failing the wire parse — the run
+    // must surface SdkProtocol instead of treating it as a non-event, where
+    // a silent skip would wait forever for a receipt that can never match
+    // (Python raises on malformed notifications; Rust surfaces the typed
+    // error).
+    let mut script = run_prefix("msg-mal-p1");
+    script.extend([
+        emit("session.event", json!({"sessionId": ROOT_SESSION})),
+        emit("session.status", idle(ROOT_SESSION)),
+        exit(0),
+    ]);
+    let err = run_once(&script, "hello")
+        .await
+        .expect_err("a malformed session.event during the receipt wait must fail the run");
+    match err {
+        Error::SdkProtocol { message } => {
+            assert!(
+                message.contains("malformed session.event during Session::run"),
+                "the error must name the malformed payload: {message}"
+            );
+            assert!(
+                message.contains("inbox receipt could not be confirmed"),
+                "the Phase-1 arm must be the one that fired: {message}"
+            );
+        }
+        other => panic!("expected SdkProtocol, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn malformed_session_event_during_collection_fails_fast() {
+    // Phase 2: a malformed session.event cannot be classified as root (or
+    // child) — it would silently vanish from `events` while still appearing
+    // in `notifications`. The payload keeps a valid `sessionId` (so the
+    // tree filter admits it) but drops the required `event` field, failing
+    // the wire parse; the run must fail instead of returning a silently
+    // truncated result.
+    let mut script = run_prefix("msg-mal-p2");
+    script.extend([
+        emit("session.event", root_event(receipt_event("msg-mal-p2"))),
+        emit("session.event", json!({"sessionId": ROOT_SESSION})),
+        emit("session.status", idle(ROOT_SESSION)),
+        exit(0),
+    ]);
+    let err = run_once(&script, "hello")
+        .await
+        .expect_err("a malformed session.event during collection must fail the run");
+    match err {
+        Error::SdkProtocol { message } => {
+            assert!(
+                message.contains("malformed session.event during Session::run"),
+                "the error must name the malformed payload: {message}"
+            );
+            assert!(
+                message.contains("could not be collected"),
+                "the Phase-2 session.event arm must be the one that fired: {message}"
+            );
+        }
+        other => panic!("expected SdkProtocol, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn malformed_session_status_fails_fast() {
+    // Phase 2: a malformed session.status could be the root idle
+    // notification — a silent skip would hang the run forever. A non-string
+    // `status` (the wire requires a string) must surface as SdkProtocol.
+    let mut script = run_prefix("msg-mal-s");
+    script.extend([
+        emit("session.event", root_event(receipt_event("msg-mal-s"))),
+        emit("session.event", root_event(turn_end("completed"))),
+        emit(
+            "session.status",
+            json!({"sessionId": ROOT_SESSION, "status": 42}),
+        ),
+        exit(0),
+    ]);
+    let err = run_once(&script, "hello")
+        .await
+        .expect_err("a malformed session.status must fail the run");
+    match err {
+        Error::SdkProtocol { message } => {
+            assert!(
+                message.contains("malformed session.status during Session::run"),
+                "the error must name the malformed payload: {message}"
+            );
+            assert!(
+                message.contains("root idle state could not be determined"),
+                "the session.status arm must be the one that fired: {message}"
+            );
+        }
+        other => panic!("expected SdkProtocol, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn broadcast_overflow_before_receipt_fails_fast_with_lag_error() {
+    // The run's subscription is created before the prompt is written and
+    // only starts reading after `session/prompt` returns. The peer emits
+    // 4097 root notifications (one more than the documented
+    // DEFAULT_BROADCAST_CAPACITY of 4096) BEFORE answering the prompt, so
+    // the receiver falls behind by exactly one while the run is not reading
+    // — deterministic by wire order, no wall-clock timing involved. The run
+    // must fail fast with the lag SdkProtocol error instead of trusting a
+    // truncated stream (the dropped set could include the receipt or the
+    // root idle, either of which would otherwise hang the run).
+    let mut script = vec![
+        expect_params(
+            "initialize",
+            json!({"provider": "deepseek-official", "model": "deepseek-v4-flash"}),
+        ),
+        respond(server_info_result()),
+        expect("session/prompt"),
+    ];
+    for _ in 0..4097 {
+        script.push(emit(
+            "session.event",
+            json!({"sessionId": ROOT_SESSION, "event": {}}),
+        ));
+    }
+    script.push(respond(json!({"messageId": "msg-lag"})));
+    script.push(exit(0));
+
+    let err = run_once(&script, "hello")
+        .await
+        .expect_err("a lagged subscription must fail the run");
+    match err {
+        Error::SdkProtocol { message } => {
+            assert!(
+                message.contains("fell behind the 4096-notification broadcast buffer"),
+                "the lag error must cite the buffer boundary: {message}"
+            );
+        }
+        other => panic!("expected SdkProtocol, got {other:?}"),
+    }
+}
