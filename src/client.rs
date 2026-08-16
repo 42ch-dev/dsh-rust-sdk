@@ -553,9 +553,17 @@ impl HarnessClient {
     /// SIGKILL → wait. Pending requests are resolved with
     /// [`Error::TransportClosed`] and the read loop is joined; failure paths
     /// surface the exit status and captured stderr tail. Idempotent.
+    ///
+    /// Teardown is unconditional: even when a ladder tier fails, pending
+    /// requests are resolved, the read/stderr tasks are joined (or aborted
+    /// after the join grace), and the notification producer is dropped. The
+    /// child is killed on drop (`kill_on_drop`), so it cannot outlive the
+    /// client; the returned error names the failing tier with the exit
+    /// status and stderr tail attached, and a later `close()` — seeing the
+    /// already-consistent terminal state — returns `Ok(())`.
     pub async fn close(&mut self) -> Result<(), Error> {
         // Idempotent: a second close (or a close of an already-closed client)
-        // returns immediately.
+        // returns immediately — the terminal state below is consistent.
         let Some(child_arc) = self.child.take() else {
             return Ok(());
         };
@@ -588,15 +596,35 @@ impl HarnessClient {
         drop(self.stdin.take());
 
         // Tiers 3-6: wait for exit after EOF, then escalate through SIGTERM
-        // and SIGKILL, waiting at each tier.
-        {
+        // and SIGKILL, waiting at each tier. The child is killed on drop
+        // (`kill_on_drop`) when `close` returns, so a ladder failure cannot
+        // strand the process; the error carries the failing tier, exit
+        // status, and stderr tail (see `reap_with_ladder`).
+        let reap_error = {
             let mut child = child_arc.lock().await;
-            self.reap_with_ladder(&mut child).await?;
-        }
+            self.reap_with_ladder(&mut child).await.err()
+        };
 
-        // The process is dead, so its stdio is closed. Resolve every pending
-        // request now — no waiter depends on the read loop's EOF timing (its
-        // own EOF resolution becomes a no-op once the map is empty).
+        // Teardown is unconditional: once the client is closed the runtime
+        // can never answer pending requests, so every waiter is resolved
+        // here, and the background tasks must not outlive the client.
+        self.finish_teardown().await;
+
+        match reap_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
+    }
+
+    /// Resolve every pending request, join (or abort) the background tasks,
+    /// and drop the notification producer — the unconditional teardown tail
+    /// of [`HarnessClient::close`].
+    ///
+    /// Runs no matter how the reap ladder ended: pending requests can never
+    /// be answered once the client is closed (the read loop's own EOF
+    /// resolution becomes a no-op once the map is empty), and the tasks
+    /// must not outlive the client.
+    async fn finish_teardown(&mut self) {
         self.fail_all_pending("DeepSeek Harness runtime closed");
 
         // Join the reader and stderr tasks; abort a task stuck on a pipe a
@@ -616,21 +644,31 @@ impl HarnessClient {
         // Drop the notification producer: existing subscriptions drain their
         // queues and then see the channel close.
         self.notifications = None;
-        Ok(())
     }
 
     /// Run the exit-wait ladder: stdin-EOF grace, then SIGTERM, then SIGKILL.
+    ///
+    /// Every failure returns [`Error::TransportClosed`] naming the failing
+    /// tier and the underlying I/O error, with the exit status (best-effort
+    /// poll) and captured stderr tail attached — the same diagnostics the
+    /// request fast-fail and EOF paths surface.
     async fn reap_with_ladder(&self, child: &mut Child) -> Result<(), Error> {
-        if child.try_wait()?.is_some() {
-            self.record_exit(child);
-            return Ok(());
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                self.record_exit(child);
+                return Ok(());
+            }
+            Ok(None) => {}
+            Err(err) => return Err(self.ladder_failure(child, "poll exit status", err)),
         }
         match tokio::time::timeout(self.timeouts.eof_grace, child.wait()).await {
             Ok(Ok(_status)) => {
                 self.record_exit(child);
                 return Ok(());
             }
-            Ok(Err(err)) => return Err(Error::Io(err)),
+            Ok(Err(err)) => {
+                return Err(self.ladder_failure(child, "wait for exit after stdin EOF", err))
+            }
             Err(_elapsed) => {}
         }
 
@@ -641,33 +679,69 @@ impl HarnessClient {
         {
             if let Err(err) = signal_child(child, Signal::SIGTERM) {
                 // The child may have exited between the wait timeout and now.
-                if child.try_wait()?.is_some() {
-                    self.record_exit(child);
-                    return Ok(());
+                match child.try_wait() {
+                    Ok(Some(_)) => {
+                        self.record_exit(child);
+                        return Ok(());
+                    }
+                    Ok(None) => {}
+                    Err(poll_err) => {
+                        return Err(self.ladder_failure(
+                            child,
+                            "poll exit status after SIGTERM",
+                            poll_err,
+                        ));
+                    }
                 }
-                return Err(Error::Io(err));
+                return Err(self.ladder_failure(child, "send SIGTERM", err));
             }
             match tokio::time::timeout(self.timeouts.term_grace, child.wait()).await {
                 Ok(Ok(_status)) => {
                     self.record_exit(child);
                     return Ok(());
                 }
-                Ok(Err(err)) => return Err(Error::Io(err)),
+                Ok(Err(err)) => {
+                    return Err(self.ladder_failure(child, "wait for exit after SIGTERM", err))
+                }
                 Err(_elapsed) => {}
             }
         }
 
         // Forced termination, then wait without a bound.
         if let Err(err) = child.start_kill() {
-            if child.try_wait()?.is_some() {
-                self.record_exit(child);
-                return Ok(());
+            // The child may have exited between the wait timeout and now.
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    self.record_exit(child);
+                    return Ok(());
+                }
+                Ok(None) => {}
+                Err(poll_err) => {
+                    return Err(self.ladder_failure(
+                        child,
+                        "poll exit status after SIGKILL",
+                        poll_err,
+                    ));
+                }
             }
-            return Err(Error::Io(err));
+            return Err(self.ladder_failure(child, "force-terminate with SIGKILL", err));
         }
-        child.wait().await?;
+        match child.wait().await {
+            Ok(_status) => {
+                self.record_exit(child);
+                Ok(())
+            }
+            Err(err) => Err(self.ladder_failure(child, "wait for exit after SIGKILL", err)),
+        }
+    }
+
+    /// Build the transport-closed error for a failed close-ladder tier: the
+    /// tier and the underlying I/O error, with the exit status (best-effort
+    /// poll) and captured stderr tail appended — the same diagnostics the
+    /// request fast-fail and EOF paths surface.
+    fn ladder_failure(&self, child: &mut Child, tier: &str, err: io::Error) -> Error {
         self.record_exit(child);
-        Ok(())
+        ladder_closed_error(&lock(&self.state), tier, &err)
     }
 
     /// Cache the child's exit code in the shared state for diagnostics.
@@ -861,6 +935,16 @@ fn closed_error(state: &SharedState, reason: &str) -> Error {
         ));
     }
     Error::TransportClosed(parts.join("\n"))
+}
+
+/// Build the transport-closed error for a failed close-ladder tier: the tier
+/// and the underlying I/O error as the reason, with the exit status and
+/// captured stderr tail appended via [`closed_error`].
+///
+/// Extracted from [`HarnessClient::ladder_failure`] so the diagnostics
+/// contract is testable without a live child process.
+fn ladder_closed_error(state: &SharedState, tier: &str, err: &io::Error) -> Error {
+    closed_error(state, &format!("close ladder: {tier} failed: {err}"))
 }
 
 /// Lock a `std::sync::Mutex`, recovering from poisoning (no panic path holds
@@ -1132,5 +1216,113 @@ mod tests {
             &notification("subagent.started", &[("parentSessionId", json!(7))],),
             "root"
         ));
+    }
+
+    #[test]
+    fn ladder_failures_embed_exit_code_and_stderr_tail() {
+        // A tier failure must carry the same diagnostics as the request
+        // fast-fail and EOF paths: the tier, the I/O error, the exit status,
+        // and the captured stderr tail.
+        let state = SharedState {
+            exit_code: Some(2),
+            closed: true,
+            stderr_tail: VecDeque::from(["boom: kaboom".to_string()]),
+        };
+        let err = io::Error::other("synthetic io failure");
+        match ladder_closed_error(&state, "send SIGTERM", &err) {
+            Error::TransportClosed(message) => {
+                assert!(message.contains("close ladder: send SIGTERM failed"));
+                assert!(message.contains("synthetic io failure"));
+                assert!(message.contains("exit code: 2"));
+                assert!(message.contains("stderr tail:\nboom: kaboom"));
+            }
+            other => panic!("expected TransportClosed, got {other:?}"),
+        }
+
+        // When nothing has been observed, the tier error still names itself
+        // without fabricating exit/stderr context.
+        let err = io::Error::other("still alive");
+        match ladder_closed_error(&SharedState::default(), "wait for exit after SIGKILL", &err) {
+            Error::TransportClosed(message) => {
+                assert!(message.contains("close ladder: wait for exit after SIGKILL failed"));
+                assert!(message.contains("still alive"));
+                assert!(!message.contains("exit code"));
+                assert!(!message.contains("stderr tail"));
+            }
+            other => panic!("expected TransportClosed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fail_all_pending_drains_every_waiter_with_transport_closed() {
+        // Teardown must resolve *every* pending waiter with a transport-
+        // closed error carrying the process diagnostics, leaving the pending
+        // map empty (a later drain is a no-op — the read loop's own EOF
+        // resolution can no longer double-resolve).
+        let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
+        let state = Arc::new(Mutex::new(SharedState {
+            exit_code: Some(1),
+            closed: true,
+            stderr_tail: VecDeque::from(["fatal: exploded".to_string()]),
+        }));
+        let (tx1, rx1) = oneshot::channel();
+        let (tx2, rx2) = oneshot::channel();
+        lock(&pending).insert("request-1".to_string(), tx1);
+        lock(&pending).insert("request-2".to_string(), tx2);
+
+        fail_all_pending(&pending, &state, "DeepSeek Harness runtime closed");
+
+        assert!(lock(&pending).is_empty(), "pending map must be drained");
+        for mut rx in [rx1, rx2] {
+            match rx.try_recv() {
+                Ok(Err(Error::TransportClosed(message))) => {
+                    assert!(message.contains("DeepSeek Harness runtime closed"));
+                    assert!(message.contains("exit code: 1"));
+                    assert!(message.contains("fatal: exploded"));
+                }
+                other => panic!("expected TransportClosed, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn finish_teardown_resolves_pending_and_joins_tasks() {
+        // The unconditional teardown tail of close(): pending requests are
+        // resolved, both background tasks are joined (their handles taken),
+        // and the notification producer is dropped — the terminal state
+        // that makes a second close() after a ladder failure safe.
+        let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
+        let parent_map = Arc::new(Mutex::new(HashMap::new()));
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        let (notifications, _receiver) = broadcast::channel(8);
+        let mut client = HarnessClient {
+            child: None,
+            stdin: None,
+            pending: Arc::clone(&pending),
+            parent_map,
+            state,
+            notifications: Some(notifications),
+            read_task: Some(tokio::spawn(async {})),
+            stderr_task: Some(tokio::spawn(async {})),
+            timeouts: ClientTimeouts::default(),
+        };
+        let (tx, mut rx) = oneshot::channel();
+        lock(&pending).insert("in-flight".to_string(), tx);
+
+        client.finish_teardown().await;
+
+        assert!(lock(&pending).is_empty(), "pending map must be drained");
+        assert!(client.read_task.is_none(), "read task must be joined");
+        assert!(client.stderr_task.is_none(), "stderr task must be joined");
+        assert!(
+            client.notifications.is_none(),
+            "notification producer must be dropped"
+        );
+        match rx.try_recv() {
+            Ok(Err(Error::TransportClosed(message))) => {
+                assert!(message.contains("DeepSeek Harness runtime closed"));
+            }
+            other => panic!("expected TransportClosed, got {other:?}"),
+        }
     }
 }
