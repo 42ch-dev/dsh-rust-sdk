@@ -1,9 +1,22 @@
 [package]
 name = "deepseek-harness-sdk"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2021"
-description = "Low-level Rust client for the DeepSeek Harness runtime stdio JSON-RPC 2.0 protocol"
+description = "Low-level Rust client and Python-parity high-level API for the DeepSeek Harness runtime stdio JSON-RPC 2.0 protocol"
 license = "Apache-2.0"
+repository = "https://github.com/42ch-dev/dsh-rust-sdk"
+readme = "README.md"
+keywords = ["deepseek", "agent", "sdk", "jsonrpc", "dsh"]
+categories = ["api-bindings", "asynchronous"]
+include = [
+    "src/**",
+    "tests/**",
+    "assets/cordis.yml",
+    "/README.md",
+    "/README.zh.md",
+    "/README.i18n.yaml",
+    "/LICENSE",
+]
 
 [dependencies]
 tokio = { version = "1", features = ["process", "io-util", "time", "sync", "rt-multi-thread", "macros"] }
