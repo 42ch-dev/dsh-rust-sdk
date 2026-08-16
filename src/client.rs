@@ -902,7 +902,11 @@ async fn read_loop(
     tokio::time::timeout(TASK_JOIN_GRACE, ctx.stderr_done.notified())
         .await
         .ok();
-    fail_all_pending(&ctx.pending, &ctx.state, "DeepSeek Harness runtime stdout closed");
+    fail_all_pending(
+        &ctx.pending,
+        &ctx.state,
+        "DeepSeek Harness runtime stdout closed",
+    );
     lock(&ctx.state).closed = true;
 }
 
@@ -979,7 +983,11 @@ async fn dispatch_frame(
 /// [`MAX_STDERR_LINE`] — the byte bound is enforced *during* accumulation,
 /// not after (unlike a plain `read_until` + truncate, which would buffer the
 /// whole unterminated line first).
-async fn stderr_loop(stderr: ChildStderr, state: Arc<Mutex<SharedState>>, stderr_done: Arc<Notify>) {
+async fn stderr_loop(
+    stderr: ChildStderr,
+    state: Arc<Mutex<SharedState>>,
+    stderr_done: Arc<Notify>,
+) {
     let mut reader = BufReader::new(stderr);
     let mut line = Vec::new();
     loop {
@@ -1082,7 +1090,10 @@ fn closed_error(state: &SharedState, reason: &str) -> Error {
         parts.push(format!("exit code: {code}"));
     }
     if !state.stderr_tail.is_empty() {
-        parts.push(format!("stderr tail:\n{}", embed_stderr_tail(&state.stderr_tail)));
+        parts.push(format!(
+            "stderr tail:\n{}",
+            embed_stderr_tail(&state.stderr_tail)
+        ));
     }
     Error::TransportClosed(parts.join("\n"))
 }
@@ -1376,7 +1387,8 @@ mod tests {
             "the first 50 edges (child-0..child-49) are gone; child-50 is the oldest survivor"
         );
         assert_eq!(
-            map.get(&format!("child-{}", MAX_PARENT_EDGES + 49)).map(String::as_str),
+            map.get(&format!("child-{}", MAX_PARENT_EDGES + 49))
+                .map(String::as_str),
             Some("parent-100049"),
             "the newest edge must be retained"
         );

@@ -601,8 +601,7 @@ mod tests {
             );
         }
         // The wire path (from_str) behaves identically.
-        let block: ContentBlock =
-            serde_json::from_str(r#"{"type":"text","text":123}"#).unwrap();
+        let block: ContentBlock = serde_json::from_str(r#"{"type":"text","text":123}"#).unwrap();
         assert!(matches!(block, ContentBlock::Unknown(_)));
 
         // Through a typed accessor the block parses as Unknown; the
@@ -628,7 +627,10 @@ mod tests {
             ),
             None => panic!("lastAssistantMessage must be present"),
         }
-        assert_eq!(n.method, "subagent.finished", "the notification is preserved");
+        assert_eq!(
+            n.method, "subagent.finished",
+            "the notification is preserved"
+        );
     }
 
     #[test]

@@ -255,10 +255,7 @@ async fn descendant_discovered_mid_stream_passes_filter() {
     // receiving it proves the pre-edge event was drained and dropped by the
     // filter while the edge map was still empty (the peer is still blocked
     // on the marker below).
-    let sentinel = subscription
-        .recv()
-        .await
-        .expect("root sentinel delivered");
+    let sentinel = subscription.recv().await.expect("root sentinel delivered");
     assert_eq!(sentinel.method, "session.event");
     assert_eq!(
         sentinel
@@ -273,7 +270,12 @@ async fn descendant_discovered_mid_stream_passes_filter() {
     // order.
     let message_id = rt
         .client
-        .session_prompt("sess-1", vec![ContentBlock::Text { text: "sync".into() }])
+        .session_prompt(
+            "sess-1",
+            vec![ContentBlock::Text {
+                text: "sync".into(),
+            }],
+        )
         .await
         .expect("marker prompt answered");
     assert_eq!(message_id, "marker-1");
@@ -290,10 +292,7 @@ async fn descendant_discovered_mid_stream_passes_filter() {
         .expect("post-edge child event delivered");
     assert_eq!(after_edge.method, "session.event");
     assert_eq!(
-        after_edge
-            .payload
-            .get("sessionId")
-            .and_then(Value::as_str),
+        after_edge.payload.get("sessionId").and_then(Value::as_str),
         Some(CHILD_SESSION)
     );
     assert_eq!(
