@@ -4,67 +4,46 @@ English | [中文](README.zh.md)
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Language](https://img.shields.io/badge/language-Rust-orange)](Cargo.toml)
-[![MSRV](https://img.shields.io/badge/MSRV-current%20stable-green)](Cargo.toml)
+[![crates.io](https://img.shields.io/crates/v/deepseek-harness-sdk)](https://crates.io/crates/deepseek-harness-sdk)
 
 Rust client SDK for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
-runtime stdio JSON-RPC 2.0 protocol: a low-level `HarnessClient` plus the
-Python-parity high-level API (`DeepSeekHarness` / `Session::run` / `RunResult`).
+(DSH) runtime: it spawns the official runtime as a subprocess and speaks its
+stdio JSON-RPC 2.0 protocol. One crate, two layers: the high-level
+Python-parity API (`DeepSeekHarness` / `Session::run` / `RunResult`) and the
+low-level protocol client (`HarnessClient`).
 
 The crate is the design twin of the official
 [Python SDK](https://github.com/deepseek-ai/deepseek-harness/tree/master/python/sdk),
-sharing the same runtime peer, wire protocol, and layering: `DeepSeekHarness`
-is the high-level owned-run API, `HarnessClient` the lower-level protocol
-client. The Python SDK surface is the alignment baseline for every type and
-error that leaks into the public API; the TypeScript SDK's divergences are
-documented (notably `RunResult`, see below).
+sharing the same runtime peer, wire protocol, and layering; the Python SDK
+surface is the alignment baseline for every public type and error. The
+TypeScript SDK's divergences are documented (notably `RunResult`, see below).
 
 This crate is a **pure client**. It contains no agent, LLM, or persistence
 logic — the spawned runtime process does all of that. The runtime binary is
-bring-your-own (Plan A): this crate never downloads, bundles, or ships one.
+bring-your-own: this crate never downloads, bundles, or ships one.
 
-## Runtime acquisition
+## Installation
 
-The runtime is bring-your-own (Plan A); the SDK only locates it. Two
-acquisition routes exist:
+```sh
+cargo add deepseek-harness-sdk@0.1.0-alpha.1
+```
 
-1. **Build from source** — check out
-   [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness), run
-   `scripts/build-exe-for-python-sdk.ts` in the checkout (see that
-   repository's build instructions), then point `DSH_RUNTIME_BIN` at the
-   built executable.
-2. **Install the runtime binary wheel** — the Python SDK's
-   `deepseek-harness-runtime-bin` platform wheel ships the same single-file
-   runtime executable; install the wheel for your platform and point
-   `DSH_RUNTIME_BIN` at the shipped executable.
+or in `Cargo.toml`:
 
-The binary is resolved with Python `HarnessClient` parity, plus the
-Rust-only `DSH_RUNTIME_BIN` route:
+```toml
+[dependencies]
+deepseek-harness-sdk = "0.1.0-alpha.1"
+```
 
-1. `Config::launch_args_override` (non-empty) — the whole argv, verbatim;
-2. `Config::runtime_bin`;
-3. `DSH_RUNTIME_BIN` from the parent environment;
-4. otherwise `Error::RuntimeNotFound`, whose message names both acquisition
-   routes above (bring-your-own, and building the official runtime via
-   `scripts/build-exe-for-python-sdk.ts`).
+> **Pre-release note:** `0.1.0-alpha.1` is a pre-release version — request it
+> explicitly (with `@0.1.0-alpha.1` or the full version string). A bare
+> `cargo add deepseek-harness-sdk` will not resolve to a pre-release. The API
+> may still change before `0.1.0`.
 
-An empty `launch_args_override` and an empty `DSH_RUNTIME_BIN` both count as
-absent (Python truthiness), so resolution never produces an unlaunchable
-empty program.
-
-With no effective `DSH_CORDIS_CONFIG`, `DeepSeekHarness::start` injects a
-bundled copy of the runtime's default `cordis.yml` (byte-identical to the
-official default), extracted to the system temp directory on first use and
-byte-verified on every use. The runtime refuses to boot without an explicit
-config, so this injection is required, not optional: a failure to extract or
-verify the bundled default propagates as `Error::Io` — never a silent
-config-less launch.
-
-> **Deliberate divergence from the Python SDK** (documented; do not "fix" to
-> match Python): the Python SDK injects its bundled default `cordis.yml`
-> only when the bundled runtime carrier is used. This crate is bring-your-own
-> runtime (Plan A) — there is no bundled carrier — so the bundled default is
-> injected whenever no effective config exists, **regardless of how the
-> runtime binary was resolved**.
+Two prerequisites before the first run: a DSH runtime (see
+[Runtime acquisition](#runtime-acquisition)) and model credentials
+(`DEEPSEEK_API_KEY` in the environment, or `Config::api_key` /
+`Config::base_url`).
 
 ## Quickstart
 
@@ -94,12 +73,123 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Prerequisites: a DeepSeek Harness runtime binary (see
-[Runtime acquisition](#runtime-acquisition)) and `DEEPSEEK_API_KEY` (or
-`Config::api_key` / `Config::base_url`). Like the other SDKs, the runtime
-inherits `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` from the environment, so
-callers can use real model endpoints directly or point those variables at a
-local proxy.
+`DeepSeekHarness::start` is eager: it resolves the runtime, spawns the
+subprocess, and completes the `initialize` handshake before returning. Like
+the other SDKs, the runtime inherits `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY`
+from the environment, so callers can use real model endpoints directly or
+point those variables at a local proxy.
+
+## Runtime acquisition
+
+The runtime is bring-your-own; the SDK only locates it. The DSH runtime is an
+npm-distributed Node.js program (`dsh-jsonrpc-agent`); upstream also ships a
+self-contained single-file executable via a Python wheel. Pick one route:
+
+### Route A — npm (default)
+
+The runtime bin is published as
+[`@deepseek-ai/dsh-sdk-jsonrpc-demo`](https://www.npmjs.com/package/@deepseek-ai/dsh-sdk-jsonrpc-demo)
+(bin: `dsh-jsonrpc-agent`). Requires Node.js ≥ 22.19. Run it either way:
+
+- **`npx` (no install)** — `npx` itself is the program, so use
+  `Config::launch_args_override`:
+
+  ```rust
+  Config {
+      launch_args_override: Some(vec![
+          "npx".into(),
+          "--yes".into(),
+          "@deepseek-ai/dsh-sdk-jsonrpc-demo".into(),
+      ]),
+      ..Config::default()
+  }
+  ```
+
+- **`npm install -g`** — the bin lands on `PATH`:
+
+  ```sh
+  npm install -g @deepseek-ai/dsh-sdk-jsonrpc-demo
+  export DSH_RUNTIME_BIN=dsh-jsonrpc-agent
+  ```
+
+Either way, the npm bin resolves the plugins named in `cordis.yml` from the
+**config project** — the directory the config file lives in — so this route
+also needs a small config project with the plugin set installed:
+
+```sh
+mkdir dsh-runtime && cd dsh-runtime
+npm init -y >/dev/null
+npm install @deepseek-ai/dsh-sdk-jsonrpc-server @deepseek-ai/dsh-agent-spine-demo \
+  @deepseek-ai/dsh-llm-deepseek @deepseek-ai/dsh-session-persistence-jsonl \
+  @deepseek-ai/dsh-session-checkpoint-policy @deepseek-ai/dsh-subprocess-local \
+  @deepseek-ai/dsh-bash-local @deepseek-ai/dsh-fs-local
+# Drop the default cordis.yml next to package.json (see below), then:
+export DSH_CORDIS_CONFIG="$PWD/cordis.yml"
+```
+
+For step 3, use the upstream default config —
+[`python/sdk-runtime/src/deepseek_harness_runtime/runtime/cordis.yml`](https://github.com/deepseek-ai/deepseek-harness/blob/master/python/sdk-runtime/src/deepseek_harness_runtime/runtime/cordis.yml)
+in the DSH repository — or compose your own (keep the
+`@deepseek-ai/dsh-sdk-jsonrpc-server` entry; without it the runtime serves
+nothing).
+
+> **npm route caveat:** the npm bin has no built-in plugin tree — plugin load
+> failures are fatal, and the SDK's bundled default config (extracted to a
+> temp directory, no `node_modules` beside it) cannot satisfy plugin
+> resolution. That is why this route sets `DSH_CORDIS_CONFIG` explicitly.
+
+### Route B — prebuilt single-file executable (wheel)
+
+Upstream packs the same runtime as a self-contained Node.js single-file
+executable (no Node.js needed at runtime; plugin tree embedded) and
+distributes it through the Python SDK's `deepseek-harness-runtime-bin`
+platform wheel (linux-x64, linux-arm64, macos-arm64):
+
+```sh
+python -m pip install deepseek-harness-runtime-bin
+export DSH_RUNTIME_BIN="$(python -c 'import deepseek_harness_runtime as r; print(r.bundled_runtime_path())')"
+```
+
+The `python -c` invocation only *locates* the installed executable and prints
+its path — **no Python runs at SDK runtime**. On macOS the executable needs
+its sibling `-spawn-helper` file in the same directory (the wheel installs
+both) — if you copy the executable elsewhere, copy the helper too.
+
+This route works out of the box with the SDK-injected bundled default
+`cordis.yml` (see below): no `DSH_CORDIS_CONFIG` needed.
+
+### How the SDK resolves the runtime (reference)
+
+The binary is resolved with Python `HarnessClient` parity, plus the
+Rust-only `DSH_RUNTIME_BIN` route:
+
+1. `Config::launch_args_override` (non-empty) — the whole argv, verbatim
+   (the npx variant of Route A uses this);
+2. `Config::runtime_bin`;
+3. `DSH_RUNTIME_BIN` from the parent environment;
+4. otherwise `Error::RuntimeNotFound`, whose message names the acquisition
+   routes.
+
+An empty `launch_args_override` and an empty `DSH_RUNTIME_BIN` both count as
+absent (Python truthiness), so resolution never produces an unlaunchable
+empty program.
+
+**Bundled default config.** With no effective `DSH_CORDIS_CONFIG`,
+`DeepSeekHarness::start` injects a bundled copy of the runtime's default
+`cordis.yml` (byte-identical to the official default), extracted to the
+system temp directory on first use and byte-verified on every use — the
+runtime refuses to boot without an explicit config, so this injection is
+required, and an extraction/verification failure propagates as `Error::Io`
+(never a silent config-less launch). Note the [npm route caveat](#route-a--npm-default):
+the bundled default only resolves plugins when the runtime carries its own
+plugin tree (Route B's executable); with the npm bin, always provide
+`DSH_CORDIS_CONFIG` yourself.
+
+> **Deliberate divergence from the Python SDK** (documented; do not "fix"):
+> Python injects its bundled default only when its bundled runtime carrier is
+> used. This crate has no bundled carrier (bring-your-own runtime), so the
+> default is injected whenever no effective config exists, regardless of how
+> the binary was resolved.
 
 ## API walkthrough
 
@@ -202,15 +292,15 @@ All failure paths return `Error` variants instead of ad-hoc strings:
 
 ### Close ladder
 
-`DeepSeekHarness::close` (and `HarnessClient::close`) runs the plan-01
-close ladder: a cooperative `shutdown` request bounded by
-`shutdown_timeout` (default 1s, diagnostic only on failure) → drop stdin
-(EOF) → wait `eof_grace` (default 6s — the runtime gets time to flush
-durable state after stdin closes) → SIGTERM → wait `term_grace` (default
-3s) → SIGKILL → wait. The ladder is idempotent, is unconditional teardown
-(failure at any tier still reaps the child — the child is also killed on
-drop, so a ladder failure cannot strand the process), and resolves all
-pending requests with `Error::TransportClosed`.
+`DeepSeekHarness::close` (and `HarnessClient::close`) runs the close ladder:
+a cooperative `shutdown` request bounded by `shutdown_timeout` (default 1s,
+diagnostic only on failure) → drop stdin (EOF) → wait `eof_grace`
+(default 6s — the runtime gets time to flush durable state after stdin
+closes) → SIGTERM → wait `term_grace` (default 3s) → SIGKILL → wait. The
+ladder is idempotent, is unconditional teardown (failure at any tier still
+reaps the child — the child is also killed on drop, so a ladder failure
+cannot strand the process), and resolves all pending requests with
+`Error::TransportClosed`.
 
 ### Notifications
 
@@ -232,8 +322,8 @@ entries — Python `dict.update` semantics):
 | Variable | Role | Semantics |
 |---|---|---|
 | `DSH_RUNTIME_BIN` | Runtime binary resolution | Consulted when neither `Config::launch_args_override` nor `Config::runtime_bin` is set; empty counts as absent |
-| `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` | Model endpoint and credentials | Inherited as-is; overridden only when `Config::base_url` / `Config::api_key` is configured |
 | `DSH_CORDIS_CONFIG` | Runtime composition config | `Config::cordis_config` (non-empty) wins; otherwise a non-empty value from `Config::env` or the parent environment is inherited as-is. Empty strings count as absent — an empty-string `Config::env` entry is skipped on copy so it can never clobber a non-empty parent value. With no effective value, the SDK injects the bundled default `cordis.yml` |
+| `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` | Model endpoint and credentials | Inherited as-is; overridden only when `Config::base_url` / `Config::api_key` is configured |
 | `DSH_CWD` | Agent working directory | Always injected, from `Config::cwd` (resolved absolute) |
 | `DSH_SESSION_ROOT` | Session root | Injected only when `Config::session_root` is configured; surfaced on every `RunResult` |
 
@@ -244,19 +334,23 @@ entries — Python `dict.update` semantics):
 - `tests/real_runtime.rs` — a single smoke test that runs **only** when both
   `DSH_RUNTIME_BIN` and `DEEPSEEK_API_KEY` are set; otherwise it prints an
   explicit skip notice and passes, so `cargo test` is green with no runtime
-  binary and no credentials present.
+  and no credentials present.
 
 ## Platform support & MSRV
 
-Consumed (not shipped) platforms — the runtime binary matrix: linux-x64,
-linux-arm64, macos-arm64. **No Windows**: the runtime has no Windows
-builds, so the SDK cannot support it.
+The SDK itself is pure Rust and platform-light; the consumed runtime decides
+the platform matrix. Route A (npm) runs wherever Node.js ≥ 22.19 does;
+Route B (wheel executable) ships linux-x64, linux-arm64, macos-arm64. **No
+Windows**: upstream has no Windows runtime builds.
 
 MSRV: current stable Rust (no minimum is pinned in `Cargo.toml`; the crate
 tracks the stable toolchain).
 
 ## Known limitations
 
+- **Pre-release software** — `0.1.0-alpha.1`; the API may change before
+  `0.1.0`. The real-runtime smoke test is environment-gated (see
+  [Testing](#testing)); the fake-runtime suites carry protocol correctness.
 - **No mid-turn cancel** — there is no session-close / cancel RPC on the
   wire. `Session::run` waits until the root session reports `idle`; closing
   the harness mid-turn abandons the in-flight turn. A `Config::request_timeout`
@@ -268,9 +362,8 @@ tracks the stable toolchain).
   declares the name wire-stable and has no negotiation, so an unexpected
   identity is a hard `Error::SdkProtocol`.
 - **No runtime binary delivery / bundling / download** — the runtime
-  companion crate and crates.io publish are roadmap items, not part of this
-  version. Acquire the runtime per
-  [Runtime acquisition](#runtime-acquisition).
+  companion crate is a roadmap item, not part of this version. Acquire the
+  runtime per [Runtime acquisition](#runtime-acquisition).
 - **No TypeScript-parity helper** — the TS-shaped `RunResult` (without
   `finish_reason` / `session_root`) is not provided.
 
