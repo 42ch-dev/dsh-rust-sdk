@@ -13,9 +13,9 @@ use deepseek_harness_sdk::{ClientTimeouts, ContentBlock, Error, HarnessClient, L
 use serde_json::json;
 
 use common::fake_runtime::{
-    emit, emit_blank, emit_raw, exit, expect, expect_params, fake_runtime_spec, ignore_all,
-    respond, respond_error, server_info_result, sleep_forever_bin, sleep_ms, test_timeouts,
-    FakeRuntime,
+    emit, emit_blank, emit_raw, emit_stderr, exit, expect, expect_params, fake_runtime_spec,
+    ignore_all, respond, respond_error, server_info_result, sleep_forever_bin, sleep_ms,
+    test_timeouts, FakeRuntime,
 };
 
 /// The canonical client-side session ids used across scenarios.
@@ -295,6 +295,42 @@ async fn request_timeout_returns_request_timeout() {
 
     // The peer never responds; close() escalates the ladder and reaps it.
     client.close().await.expect("close reaps the ignoring peer");
+}
+
+#[tokio::test]
+async fn spontaneous_death_surfaces_exit_code_and_stderr_tail() {
+    // The canonical crash scenario: the runtime dies (exit 101, a Rust
+    // panic-like code) while a request is in flight. The read loop's EOF
+    // path must attach the exit code and the captured stderr tail to the
+    // pending request's TransportClosed error (plan contract), not just
+    // the tail.
+    let mut rt = FakeRuntime::spawn(&[
+        expect("session/prompt"),
+        emit_stderr("fatal: runtime panicked"),
+        exit(101),
+    ])
+    .expect("spawn fake runtime");
+
+    let err = rt
+        .client
+        .session_prompt("sess-1", vec![ContentBlock::Text { text: "hi".into() }])
+        .await
+        .expect_err("a request pending at runtime death must fail");
+    match &err {
+        Error::TransportClosed(message) => {
+            assert!(
+                message.contains("exit code: 101"),
+                "EOF-path error must carry the exit code, got: {message}"
+            );
+            assert!(
+                message.contains("fatal: runtime panicked"),
+                "EOF-path error must carry the stderr tail, got: {message}"
+            );
+        }
+        other => panic!("expected TransportClosed, got {other:?}"),
+    }
+
+    rt.client.close().await.expect("close after death");
 }
 
 #[tokio::test]

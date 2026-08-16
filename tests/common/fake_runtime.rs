@@ -115,6 +115,12 @@ pub fn emit_raw(line: &str) -> Directive {
     }
 }
 
+pub fn emit_stderr(line: &str) -> Directive {
+    Directive::EmitStderr {
+        line: line.to_string(),
+    }
+}
+
 pub fn emit_blank() -> Directive {
     Directive::EmitBlank
 }

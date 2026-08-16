@@ -37,6 +37,9 @@ pub enum Directive {
     /// Emit one raw line on stdout that is not valid JSON (malformed-peer
     /// line tolerance).
     EmitRaw { line: String },
+    /// Write one line to the peer's stderr (exercises the client's stderr
+    /// capture diagnostics).
+    EmitStderr { line: String },
     /// Emit one blank line on stdout.
     EmitBlank,
     /// Read and discard every further client line without ever responding,

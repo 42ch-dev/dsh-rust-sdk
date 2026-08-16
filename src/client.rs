@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, oneshot, Notify};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -334,30 +334,37 @@ impl HarnessClient {
         let (notifications, _) = broadcast::channel(broadcast_capacity.max(1));
 
         let stdin_shared = Arc::new(tokio::sync::Mutex::new(stdin));
+        let child_shared = Arc::new(tokio::sync::Mutex::new(child));
 
         let read_stdin = Arc::downgrade(&stdin_shared);
+        let read_child = Arc::downgrade(&child_shared);
         let read_pending = Arc::clone(&pending);
         let read_parent_map = Arc::clone(&parent_map);
         let read_state = Arc::clone(&state);
         let read_notifications = notifications.clone();
+        let stderr_done = Arc::new(Notify::new());
+        let read_stderr_done = Arc::clone(&stderr_done);
         let read_task = tokio::spawn(async move {
             let transport = JsonRpcLineTransport::new(stdout, tokio::io::sink());
             read_loop(
                 transport,
                 read_stdin,
+                read_child,
                 read_pending,
                 read_parent_map,
                 read_notifications,
                 read_state,
+                read_stderr_done,
             )
             .await;
         });
 
         let stderr_state = Arc::clone(&state);
-        let stderr_task = tokio::spawn(async move { stderr_loop(stderr, stderr_state).await });
+        let stderr_task =
+            tokio::spawn(async move { stderr_loop(stderr, stderr_state, stderr_done).await });
 
         Ok(Self {
-            child: Some(Arc::new(tokio::sync::Mutex::new(child))),
+            child: Some(child_shared),
             stdin: Some(stdin_shared),
             pending,
             parent_map,
@@ -802,10 +809,12 @@ fn fail_all_pending(pending: &PendingMap, state: &Mutex<SharedState>, reason: &s
 async fn read_loop(
     mut transport: JsonRpcLineTransport<ChildStdout, tokio::io::Sink>,
     stdin: Weak<tokio::sync::Mutex<ChildStdin>>,
+    child: Weak<tokio::sync::Mutex<Child>>,
     pending: PendingRequests,
     parent_map: Arc<Mutex<HashMap<String, String>>>,
     notifications: broadcast::Sender<Notification>,
     state: Arc<Mutex<SharedState>>,
+    stderr_done: Arc<Notify>,
 ) {
     loop {
         match transport.read_frame().await {
@@ -819,6 +828,24 @@ async fn read_loop(
             }
         }
     }
+    // Best-effort: poll the child once so EOF-path diagnostics carry the
+    // exit code (plan contract: EOF resolves pending with exit code +
+    // stderr tail). The child lock may be held by the close ladder or the
+    // child may already have been waited on — skip silently either way.
+    if let Some(child) = child.upgrade() {
+        if let Ok(mut guard) = child.try_lock() {
+            if let Ok(Some(status)) = guard.try_wait() {
+                lock(&state).exit_code = status.code();
+            }
+        }
+    }
+    // Give the stderr task a bounded moment to drain its pipe so the
+    // EOF-path error embeds the complete captured tail. When the process
+    // died (the common EOF case) the pipe closes immediately; the bound
+    // only guards a grandchild keeping stderr open after stdout closed.
+    tokio::time::timeout(TASK_JOIN_GRACE, stderr_done.notified())
+        .await
+        .ok();
     fail_all_pending(&pending, &state, "DeepSeek Harness runtime stdout closed");
     lock(&state).closed = true;
 }
@@ -896,7 +923,7 @@ async fn dispatch_frame(
 /// [`MAX_STDERR_LINE`] — the byte bound is enforced *during* accumulation,
 /// not after (unlike a plain `read_until` + truncate, which would buffer the
 /// whole unterminated line first).
-async fn stderr_loop(stderr: ChildStderr, state: Arc<Mutex<SharedState>>) {
+async fn stderr_loop(stderr: ChildStderr, state: Arc<Mutex<SharedState>>, stderr_done: Arc<Notify>) {
     let mut reader = BufReader::new(stderr);
     let mut line = Vec::new();
     loop {
@@ -920,6 +947,10 @@ async fn stderr_loop(stderr: ChildStderr, state: Arc<Mutex<SharedState>>) {
             }
         }
     }
+    // Signal the read loop (if it is on the EOF path) that the captured
+    // stderr stream has fully drained, so the EOF error can embed the
+    // complete tail.
+    stderr_done.notify_waiters();
 }
 
 /// Read one line into `buf`, retaining at most `max_bytes` bytes.

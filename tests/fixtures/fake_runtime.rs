@@ -86,6 +86,7 @@ fn main() {
                 writeln!(out, "{line}").expect("write raw line");
                 out.flush().expect("flush raw line");
             }
+            Directive::EmitStderr { line } => eprintln!("{line}"),
             Directive::EmitBlank => {
                 writeln!(out).expect("write blank line");
                 out.flush().expect("flush blank line");
