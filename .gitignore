@@ -28,7 +28,7 @@ target
 # Default-ignore everything under .mstar/, then re-include the tracked results.
 .mstar/**
 !.mstar/AGENTS.md
-!.mstar/roadmap.md
+# roadmap.md intentionally local (owner decision 2026-08-16): tracked copy removed from index
 !.mstar/knowledge/
 !.mstar/knowledge/**
 !.mstar/specs/

@@ -21,13 +21,23 @@ Rust SDK for DSH (DeepSeek Harness). Builds with Cargo (`cargo build` / `cargo t
 
 - `cargo build` — compiles the workspace.
 - `cargo test` — runs the suite (default before merge).
-- `cargo fmt --check` / `cargo clippy -- -D warnings` — style/lint gates.
+- `cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` — style/lint gates.
+- Toolchain: `rust-toolchain.toml` pins `channel = "stable"`, `profile = "minimal"`; MSRV statement is "current stable".
+- CI (`.github/workflows/ci.yml`): same gates on `pull_request` and `push` to `main` / `iteration/**`; pinned action SHAs, per-ref concurrency, rust-cache.
 
 ## Git & Branch Policy
 
-- Default working style: feature branches off `main`; no direct pushes to `main`.
+- Default working style: feature branches off `main` + PR; no direct pushes to `main` (repo rule "Changes must be made through a pull request"). Small doc/toolchain chores may go direct on owner instruction.
 - Branch/worktree alignment and QC checkout rules: `mstar-branch-worktree` skill; status/residual SSOT: `status.json` (see `.mstar/AGENTS.md`).
-- Never commit `status.json`, `plans/`, `iterations/`, `sdd/`, `notes.json` by default (process-local).
+- Never commit `status.json`, `plans/`, `iterations/`, `sdd/`, `notes.json` (process-local).
+- `.mstar/roadmap.md` is **local-only**: untracked, gitignored; do not `git add` it. Cross-clone durable roadmap content belongs in `.mstar/knowledge/` or this file.
+
+## Bilingual README rule
+
+- `README.md` (English) and `README.zh.md` (Chinese) are a **parity pair**: same sections, same order, same facts, equal authority. Never edit one without bringing the other along in the same change.
+- `README.i18n.yaml` records the git blob hash of each side at the last confirmed-consistent state. After editing either side, update the other, then re-record: `git hash-object README.md` / `git hash-object README.zh.md`.
+- Head-of-file language switcher on both sides: EN `English | [中文](README.zh.md)`; ZH `[English](README.md) | 中文`.
+- Upstream DSH references only via `https://github.com/deepseek-ai/deepseek-harness` (citation rule); no local filesystem paths in either README.
 
 ## Escalation
 
