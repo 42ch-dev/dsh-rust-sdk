@@ -809,6 +809,24 @@ impl HarnessClient {
     }
 }
 
+impl Drop for HarnessClient {
+    fn drop(&mut self) {
+        // Best-effort cleanup for a client dropped without close(): abort the
+        // background tasks so they cannot linger on pipes a grandchild kept
+        // open. `close()` already joins (or aborts) them via
+        // `finish_teardown`, which takes the handles — so this fires only on
+        // the drop-without-close path. The child itself is killed on drop
+        // (`kill_on_drop`), and aborting the tasks releases their pipe
+        // halves.
+        if let Some(handle) = self.read_task.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.stderr_task.take() {
+            handle.abort();
+        }
+    }
+}
+
 /// Drain the pending map into transport-closed errors (used by the read loop
 /// when stdout closes).
 fn fail_all_pending(pending: &PendingMap, state: &Mutex<SharedState>, reason: &str) {
@@ -1606,6 +1624,59 @@ mod tests {
             "EOF with nothing buffered must report Ok(false)"
         );
         writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_without_close_aborts_background_tasks() {
+        // FIX-11: a client dropped without close() must abort its background
+        // tasks (they cannot be awaited inside Drop). The task body installs
+        // a Drop guard; aborting drops the future, which runs the guard —
+        // the only observable signal from outside the task.
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let aborted = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&aborted);
+        let task = tokio::spawn(async move {
+            struct Guard(Arc<AtomicBool>);
+            impl Drop for Guard {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::SeqCst);
+                }
+            }
+            let _guard = Guard(flag);
+            // Never completes on its own; each sleep registers a waker so an
+            // abort can wake and drop the task.
+            loop {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+
+        let client = HarnessClient {
+            child: None,
+            stdin: None,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            parent_map: Arc::new(Mutex::new(ParentMap::new())),
+            state: Arc::new(Mutex::new(SharedState::default())),
+            notifications: None,
+            read_task: Some(task),
+            stderr_task: None,
+            timeouts: ClientTimeouts::default(),
+        };
+        // Let the background task start (a real client's read/stderr tasks
+        // are always actively polled on their pipes); aborting a task that
+        // has never been polled would not drop it until runtime shutdown.
+        tokio::task::yield_now().await;
+        drop(client);
+
+        // Abort is processed asynchronously on the runtime; poll briefly.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !aborted.load(Ordering::SeqCst) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "read task must be aborted when the client is dropped without close()"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 
     #[tokio::test]
