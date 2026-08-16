@@ -1,0 +1,250 @@
+# deepseek-harness-sdk
+
+[English](README.md) | 中文
+
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![Language](https://img.shields.io/badge/language-Rust-orange)](Cargo.toml)
+[![MSRV](https://img.shields.io/badge/MSRV-current%20stable-green)](Cargo.toml)
+
+面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
+运行时 stdio JSON-RPC 2.0 协议的 Rust 客户端 SDK：底层 `HarnessClient`
+加 Python 对齐的高层 API（`DeepSeekHarness` / `Session::run` / `RunResult`）。
+
+本 crate 是官方
+[Python SDK](https://github.com/deepseek-ai/deepseek-harness/tree/master/python/sdk)
+的设计孪生，共享同一运行时对端、同一线上协议、同一分层：`DeepSeekHarness`
+是高层 owned-run API，`HarnessClient` 是更低层的协议客户端。凡是泄漏进公开
+API 的类型与错误，均以 **Python SDK 表面为对齐基线**；TypeScript SDK 的差异
+有明确记录（最典型的是 `RunResult`，见下文）。
+
+本 crate 是**纯客户端**。它不包含任何 agent、LLM 或持久化逻辑——这些全部
+由被拉起的运行时进程完成。运行时二进制为自带（Plan A）：本 crate 从不下载、
+捆绑或随包分发运行时。
+
+## 运行时获取
+
+运行时为自带（Plan A）；SDK 只负责定位它。有两条获取途径：
+
+1. **从源码构建** —— 检出
+   [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)，
+   在该检出中运行 `scripts/build-exe-for-python-sdk.ts`（构建说明见该仓库
+   文档），然后将 `DSH_RUNTIME_BIN` 指向构建出的可执行文件。
+2. **安装运行时二进制 wheel** —— Python SDK 的
+   `deepseek-harness-runtime-bin` 平台 wheel 分发同一个单文件运行时
+   可执行文件；安装与你平台匹配的 wheel，将 `DSH_RUNTIME_BIN` 指向其中
+   的可执行文件。
+
+二进制解析遵循 Python `HarnessClient` 的对齐语义，外加 Rust 独有的
+`DSH_RUNTIME_BIN` 途径：
+
+1. `Config::launch_args_override`（非空）—— 完整 argv，原样使用；
+2. `Config::runtime_bin`；
+3. 父进程环境中的 `DSH_RUNTIME_BIN`；
+4. 否则返回 `Error::RuntimeNotFound`，其错误消息会点名上述两条获取途径
+   （自带二进制，以及通过 `scripts/build-exe-for-python-sdk.ts` 构建官方
+   运行时）。
+
+空的 `launch_args_override` 与空的 `DSH_RUNTIME_BIN` 均视为不存在
+（Python truthiness），因此解析永远不会产生无法启动的空程序。
+
+当不存在有效的 `DSH_CORDIS_CONFIG` 时，`DeepSeekHarness::start` 会注入一份
+随包携带的运行时默认 `cordis.yml`（与官方默认逐字节一致），首次使用时解压
+到系统临时目录，且每次使用都会做字节校验。运行时在缺少显式配置时拒绝启动，
+因此该注入是**必需**的而非可选的：解压或校验失败会以 `Error::Io` 传播——
+绝不会静默地无配置启动。
+
+> **与 Python SDK 的刻意分歧**（已记录；请勿"修正"为与 Python 一致）：
+> Python SDK 仅在捆绑运行时载体被使用时才注入其默认 `cordis.yml`。本 crate
+> 是自带运行时（Plan A）——不存在捆绑载体——因此只要没有有效配置就会注入
+> 默认配置，**无论运行时二进制是如何解析得到的**。
+
+## 快速开始
+
+```rust
+use deepseek_harness_sdk::{Config, DeepSeekHarness, Input};
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut harness = DeepSeekHarness::start(Config {
+        runtime_bin: std::env::var("DSH_RUNTIME_BIN").ok(),
+        request_timeout: Some(Duration::from_secs(120)),
+        ..Config::default()
+    })
+    .await?;
+
+    let session = harness.start_session(None);
+    let result = session
+        .run(Input::Text("Reply with exactly: ok".into()))
+        .await?;
+
+    println!("finish_reason: {:?}", result.finish_reason);
+    println!("final_response: {}", result.final_response);
+
+    harness.close().await?;
+    Ok(())
+}
+```
+
+前置条件：一个 DeepSeek Harness 运行时二进制（见
+[运行时获取](#运行时获取)）以及 `DEEPSEEK_API_KEY`（或
+`Config::api_key` / `Config::base_url`）。与其他 SDK 一样，运行时从环境中
+继承 `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY`，因此调用方可以直接使用真实
+模型端点，或把这些变量指向本地代理。
+
+## API 走读
+
+### 分层
+
+- `HarnessClient`（底层）：拉起运行时进程，持有 stdio 传输层，讲
+  JSON-RPC 2.0 线上协议，并把通知扇出到各订阅。暴露 `LaunchSpec`、
+  `ClientTimeouts` 与 `NotificationSubscription`。
+- `DeepSeekHarness` / `Session`（高层）：构建在 `HarnessClient` 之上的
+  Python 对齐 owned-run API。
+- `Input` 接受纯文本（`Input::Text`）或原始内容块（`Input::Blocks`），
+  镜像 Python 的 `normalize_input`。
+
+### `DeepSeekHarness::start`
+
+`start` 是**急切**的：它在返回前完成解析运行时、组装环境注入集、拉起
+子进程并执行 `initialize` 握手。（这与 Python 与 TypeScript SDK 不同——
+它们首次使用时才惰性启动。）握手失败时，错误在传播前会先跑完关闭阶梯，
+因此拉起的子进程绝不会泄漏（Python 对齐）。
+
+`Config::cwd` 会被解析为绝对路径（Python `Path(cwd).resolve()`），同时
+供给 `DSH_CWD` 与 `initialize.cwd`；cwd 不存在时以 `Error::Io` 失败。
+`Config::request_timeout` 约束每一个请求，包括 `session/prompt`；
+`None`（默认值）表示无限等待。
+
+`start_session` 创建的会话可以并发运行：harness 在异步互斥锁后持有拉起的
+子进程，各会话在 `session/prompt` 写入处交错，并各自在自己的订阅上等待。
+
+### `Session::run` —— 一次活动区间
+
+`run` 逐字实现 Python `Session.run` 算法：
+
+1. **在写入 prompt 之前**订阅会话树，保证本轮的每条通知都不会漏掉。
+2. 发送 `session/prompt`（受 `Config::request_timeout` 约束）。
+3. 等待持久化的 `agent/inbox/spliced` 回执，其 `inserted[].id` 等于返回的
+   消息 id（字段名是 `id`，**不是** `messageId`）；回执之前的通知会从
+   `events` 与 `notifications` 中一并丢弃。
+4. 从回执（**含**回执本身）开始收集全部树通知，直到**根**会话上报
+   `session.status == "idle"`（这条 idle 通知也会被收集；非根会话的 idle
+   不会终止本次 run）。
+
+`events` 只包含根会话的 `session.event` 载荷；`notifications` 包含全部树
+通知（根会话 + 发现的子代会话，含 `session.status` / `subagent.*`），按
+传输顺序排列。
+
+两段等待——等回执与等 idle——都是**无界**的（Python 对齐）；只有
+`session/prompt` 请求受 `Config::request_timeout` 约束。需要边界的调用方
+请用 `tokio::time::timeout` 包住该调用——这只约束本地等待，不约束运行时
+侧的执行。`session.event` / `session.status` 通知的载荷若不符合线上形状，
+本次 run 会以 `Error::SdkProtocol` 失败（Python SDK 会 raise；Rust 把同一
+情形以类型化错误呈现，而不是静默丢弃事件或误判 idle 终止）。
+
+### `RunResult`
+
+`RunResult` 遵循 **Python** SDK 的字段集。TypeScript SDK 的 `RunResult`
+缺少 `finish_reason` 与 `session_root`；Rust 有意跟随 Python 而非
+TypeScript：
+
+| 字段 | Python | TypeScript | Rust（本 crate） |
+|---|---|---|---|
+| `session_id` / `sessionId` | yes | yes | `session_id: String` |
+| `final_response` / `finalResponse` | yes | yes | `final_response: String` |
+| `finish_reason` | yes（Python 扩展） | no | `finish_reason: Option<String>` |
+| `events` | yes（仅根会话） | yes | `events: Vec<serde_json::Value>` |
+| `notifications` | yes（根 + 子代，传输顺序） | yes | `notifications: Vec<Notification>` |
+| `session_root` | yes（Python 扩展） | no | `session_root: Option<PathBuf>` |
+
+（该表在 crate rustdoc 的 `# Compatibility` 中镜像；两处副本需保持同步。）
+
+两个派生字段描述的是本次拥有的活动区间，而非因果归属于该 prompt 的输出：
+`final_response` 是区间内最后一条已提交的根会话 assistant 文本——steering、
+注入的上下文及其他排队的工作都可能先于 idle 产生贡献；`finish_reason` 是
+区间内最后一条根会话 `turn/end` 的 `kind`（如 `completed`、`max-tokens`、
+`error`），没有 `turn/end` 时为 `None`。`turn/end` 缺少字符串形式的
+`data.reason.kind` 违反运行时协议，以 `Error::SdkProtocol` 失败。
+
+### 类型化错误
+
+所有失败路径都返回 `Error` 变体，而非临时字符串：
+
+| 变体 | 含义 |
+|---|---|
+| `Error::RuntimeNotFound` | 任何地方都没有配置运行时二进制；消息会点名获取途径 |
+| `Error::TransportClosed` | 运行时进程未运行，或 stdio 意外关闭；携带诊断信息（退出状态与捕获的 stderr 尾部） |
+| `Error::RequestTimeout` | 请求在配置的超时时间内未得到响应；携带方法名 |
+| `Error::SdkProtocol` | 协议级违规（服务器身份缺失、`messageId` 缺失、`finish_reason` 提取失败、畸形通知、订阅滞后）；可用 `Error::is_protocol()` 检测 |
+| `Error::JsonRpc` | JSON-RPC 错误响应，保留 `code`（`Option<i64>`）与可选 `data` |
+| `Error::Io` / `Error::Json` | I/O（spawn、stdio、传输）与 JSON 序列化/反序列化错误 |
+
+### 关闭阶梯
+
+`DeepSeekHarness::close`（与 `HarnessClient::close`）执行 plan-01 关闭
+阶梯：协作式 `shutdown` 请求（受 `shutdown_timeout` 约束，默认 1s，失败仅
+作诊断）→ 关闭 stdin（EOF）→ 等待 `eof_grace`（默认 6s——运行时在 stdin
+关闭后有时间冲刷持久化状态）→ SIGTERM → 等待 `term_grace`（默认 3s）→
+SIGKILL → 等待。该阶梯幂等，是无条件清理（任何一层的失败仍会回收子进程——
+子进程还会在 drop 时被杀，阶梯失败不会遗留游离进程），并会以
+`Error::TransportClosed` 解析所有挂起请求。
+
+### 通知
+
+树通知经由一条容量上限为 4096、drop-oldest 语义的广播通道。如果高流量
+会话树在 SDK 两次读取之间灌入超过容量的通知，被丢弃集合可能包含某次 run
+所依赖的收件回执或根 idle 通知——此时 `Session::run` 不会永远挂起或返回
+静默截断的结果，而是**快速失败**，报 `Error::SdkProtocol`。预期超大突发
+量的调用方只能经由底层 `HarnessClient::spawn_with_broadcast_capacity`
+绕过该上限，而不是用 `DeepSeekHarness::start`。
+
+## 环境变量
+
+父进程环境整体继承；SDK 只注入或覆盖下表所列键（SDK 键优先于调用方
+`Config::env` 条目——Python `dict.update` 语义）：
+
+| 变量 | 作用 | 语义 |
+|---|---|---|
+| `DSH_RUNTIME_BIN` | 运行时二进制解析 | 当 `Config::launch_args_override` 与 `Config::runtime_bin` 均未设置时被查阅；空值视为不存在 |
+| `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` | 模型端点与凭据 | 原样继承；仅在配置了 `Config::base_url` / `Config::api_key` 时被覆盖 |
+| `DSH_CORDIS_CONFIG` | 运行时组合配置 | `Config::cordis_config`（非空）优先；否则继承 `Config::env` 或父进程环境中非空的值。空字符串视为不存在——复制时跳过空字符串的 `Config::env` 条目，使其永远不会覆盖父进程中非空的值。没有有效值时，SDK 注入捆绑的默认 `cordis.yml` |
+| `DSH_CWD` | agent 工作目录 | 始终注入，取自 `Config::cwd`（解析为绝对路径） |
+| `DSH_SESSION_ROOT` | 会话根目录 | 仅在配置了 `Config::session_root` 时注入；在每次 `RunResult` 上呈现 |
+
+## 测试
+
+- `cargo test` —— 针对脚本化 fake runtime 的线上协议、生命周期与
+  `Session::run` 语义测试套件（无需真实运行时）。
+- `tests/real_runtime.rs` —— 单个冒烟测试，仅在同时设置了
+  `DSH_RUNTIME_BIN` 与 `DEEPSEEK_API_KEY` 时运行；否则打印显式跳过说明
+  并直接通过，因此没有运行时二进制与凭据时 `cargo test` 也是绿的。
+
+## 平台支持与 MSRV
+
+消费（而非分发）的平台——即运行时二进制矩阵：linux-x64、linux-arm64、
+macos-arm64。**不支持 Windows**：运行时没有 Windows 构建，SDK 因此无法
+支持该平台。
+
+MSRV：当前 stable Rust（`Cargo.toml` 未固定最低版本；本 crate 跟随稳定版
+工具链）。
+
+## 已知限制
+
+- **不支持中途取消** —— 线上协议没有 session-close / cancel RPC。
+  `Session::run` 会一直等到根会话上报 `idle`；中途关闭 harness 会放弃
+  进行中的回合。`Config::request_timeout` 只会放弃本地等待——服务端工作
+  仍会继续运行直到关闭。
+- **没有版本协商** —— 运行时以 `serverInfo` 0.0.1 预发布身份标识，
+  `initialize` 执行严格的 `serverInfo.name` 检查
+  （`deepseek-harness-sdk-runtime`）且 `version` 必填：协议声明该名称在
+  线上稳定、无协商机制，因此身份不符是硬性 `Error::SdkProtocol`。
+- **无运行时二进制分发 / 捆绑 / 下载** —— 运行时配套 crate 与 crates.io
+  发布均为路线图事项，不属于本版本。请按
+  [运行时获取](#运行时获取) 自行获取运行时。
+- **不提供 TypeScript 对齐辅助** —— 不带 `finish_reason` / `session_root`
+  的 TS 形状 `RunResult` 不在提供范围内。
+
+## License
+
+Apache-2.0。
