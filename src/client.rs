@@ -295,6 +295,14 @@ impl HarnessClient {
     /// Spawn the runtime process with a default 4096-notification broadcast
     /// capacity and start reading its stdout.
     ///
+    /// # Tokio runtime requirement
+    ///
+    /// This function starts background Tokio tasks ([`tokio::spawn`]) and
+    /// takes the subprocess's stdio halves, so it MUST be called from within
+    /// an active Tokio runtime — typically a `#[tokio::main]` function or a
+    /// `#[tokio::test]`. Called from outside a runtime it panics (no reactor
+    /// is running) and the returned client is unusable.
+    ///
     /// The runtime's stderr is captured to a bounded 400-line tail (not
     /// inherited) and embedded in transport/close diagnostics.
     pub fn spawn(spec: LaunchSpec, timeouts: ClientTimeouts) -> Result<Self, Error> {
@@ -304,6 +312,11 @@ impl HarnessClient {
     /// Like [`HarnessClient::spawn`], with an explicit broadcast capacity for
     /// the notification channel (the `Lagged(n)` drop-oldest behavior is
     /// documented on [`NotificationSubscription`]).
+    ///
+    /// Like [`HarnessClient::spawn`], this MUST be called from within an
+    /// active Tokio runtime (typically `#[tokio::main]` / `#[tokio::test]`):
+    /// the spawn functions start background tasks and panic outside a
+    /// runtime.
     pub fn spawn_with_broadcast_capacity(
         spec: LaunchSpec,
         timeouts: ClientTimeouts,
