@@ -1,0 +1,6 @@
+[toolchain]
+# Tracks current stable (the crate's stated MSRV policy). CI (dtolnay/
+# rust-toolchain@stable) resolves to the same channel. Bump the comment date
+# when the local/CI pin moves.
+channel = "stable"
+profile = "minimal"
