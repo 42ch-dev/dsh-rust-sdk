@@ -19,6 +19,7 @@
 pub mod client;
 pub mod error;
 pub mod protocol;
+pub mod runtime;
 pub mod transport;
 
 pub use client::{ClientTimeouts, HarnessClient, LaunchSpec, NotificationSubscription};
