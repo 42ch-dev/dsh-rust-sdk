@@ -105,6 +105,18 @@ const MAX_STDERR_LINE: usize = 64 * 1024;
 /// first, newest line truncated if it alone overflows).
 const MAX_EMBEDDED_STDERR_BYTES: usize = 8 * 1024;
 
+/// Maximum number of parent→child edges retained in the client-side session
+/// tree.
+///
+/// A long-running client spawning many subagents would otherwise grow the
+/// map without bound for its lifetime. When the cap is reached the oldest
+/// edges are evicted (drop-oldest). The reference clients retain every edge
+/// for the client lifetime; this local bound is a deliberate divergence so
+/// memory stays bounded — a subscription created after an edge was evicted
+/// can no longer discover that (evicted) descendant, which is acceptable for
+/// a defensive bound far beyond realistic subagent counts.
+const MAX_PARENT_EDGES: usize = 100_000;
+
 /// Grace for joining the reader/stderr tasks after the runtime process has
 /// been reaped (Python joins with 0.5s; a stuck task is aborted so its pipes
 /// are released).
@@ -142,7 +154,7 @@ type PendingRequests = Arc<PendingMap>;
 #[derive(Debug)]
 pub struct NotificationSubscription {
     receiver: Option<broadcast::Receiver<Notification>>,
-    parent_map: Arc<Mutex<HashMap<String, String>>>,
+    parent_map: Arc<Mutex<ParentMap>>,
     state: Arc<Mutex<SharedState>>,
     root: String,
 }
@@ -222,7 +234,7 @@ enum DrainOutcome {
 /// Pop one matching notification from the receiver's queue without waiting.
 fn drain_queued(
     receiver: &mut broadcast::Receiver<Notification>,
-    parent_map: &Arc<Mutex<HashMap<String, String>>>,
+    parent_map: &Arc<Mutex<ParentMap>>,
     root: &str,
 ) -> DrainOutcome {
     loop {
@@ -265,7 +277,7 @@ pub struct HarnessClient {
     /// In-flight requests by request id (uuid-v4 string).
     pending: PendingRequests,
     /// `subagent.started` parent→child session edges (client-side tree).
-    parent_map: Arc<Mutex<HashMap<String, String>>>,
+    parent_map: Arc<Mutex<ParentMap>>,
     /// Shared client state (exit code, closed flag, stderr tail).
     state: Arc<Mutex<SharedState>>,
     /// Notification producer; `None` after close (subscriptions then drain
@@ -329,7 +341,7 @@ impl HarnessClient {
             .expect("stderr was piped; take cannot fail");
 
         let pending = Arc::new(Mutex::new(HashMap::new()));
-        let parent_map = Arc::new(Mutex::new(HashMap::new()));
+        let parent_map = Arc::new(Mutex::new(ParentMap::new()));
         let state = Arc::new(Mutex::new(SharedState::default()));
         let (notifications, _) = broadcast::channel(broadcast_capacity.max(1));
 
@@ -811,7 +823,7 @@ async fn read_loop(
     stdin: Weak<tokio::sync::Mutex<ChildStdin>>,
     child: Weak<tokio::sync::Mutex<Child>>,
     pending: PendingRequests,
-    parent_map: Arc<Mutex<HashMap<String, String>>>,
+    parent_map: Arc<Mutex<ParentMap>>,
     notifications: broadcast::Sender<Notification>,
     state: Arc<Mutex<SharedState>>,
     stderr_done: Arc<Notify>,
@@ -855,7 +867,7 @@ async fn read_loop(
 async fn dispatch_frame(
     frame: Value,
     pending: &PendingMap,
-    parent_map: &Mutex<HashMap<String, String>>,
+    parent_map: &Mutex<ParentMap>,
     notifications: &broadcast::Sender<Notification>,
     stdin: &Weak<tokio::sync::Mutex<ChildStdin>>,
 ) {
@@ -1103,8 +1115,45 @@ fn signal_child(child: &Child, signal: Signal) -> io::Result<()> {
 #[cfg(unix)]
 use nix::sys::signal::Signal;
 
-/// The client-side `subagent.started` parent→child edge map.
-type ParentMap = HashMap<String, String>;
+/// The client-side `subagent.started` parent→child session edge map, bounded
+/// to [`MAX_PARENT_EDGES`] entries with drop-oldest eviction.
+///
+/// Each entry maps a child session id to its parent; the insertion order is
+/// tracked so the oldest edges are evicted first once the cap is reached.
+#[derive(Debug, Default)]
+struct ParentMap {
+    /// child session id -> parent session id.
+    edges: HashMap<String, String>,
+    /// Child ids in insertion order, for drop-oldest eviction.
+    order: VecDeque<String>,
+}
+
+impl ParentMap {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn len(&self) -> usize {
+        self.edges.len()
+    }
+
+    fn get(&self, child: &str) -> Option<&String> {
+        self.edges.get(child)
+    }
+
+    /// Record (or update) a parent→child edge, evicting the oldest edges
+    /// once the map exceeds [`MAX_PARENT_EDGES`].
+    fn insert(&mut self, child: String, parent: String) {
+        if !self.edges.contains_key(&child) {
+            self.order.push_back(child.clone());
+        }
+        self.edges.insert(child, parent);
+        while self.order.len() > MAX_PARENT_EDGES {
+            let oldest = self.order.pop_front().expect("order mirrors edges");
+            self.edges.remove(&oldest);
+        }
+    }
+}
 
 /// Record a parent→child session edge when `notification` is a well-formed
 /// `subagent.started` (both ids non-empty strings, parent != child).
@@ -1261,6 +1310,44 @@ mod tests {
         assert_eq!(map.len(), 2);
         assert_eq!(map.get("child1").map(String::as_str), Some("root"));
         assert_eq!(map.get("child2").map(String::as_str), Some("child1"));
+    }
+
+    #[test]
+    fn parent_map_evicts_oldest_edges_past_the_cap() {
+        // FIX-3: the edge map is bounded; once MAX_PARENT_EDGES is reached
+        // the oldest edges are evicted (drop-oldest), so a long-lived client
+        // cannot grow the tree without bound.
+        let mut map = ParentMap::new();
+        for i in 0..MAX_PARENT_EDGES + 50 {
+            map.insert(format!("child-{i}"), format!("parent-{i}"));
+        }
+        assert_eq!(
+            map.len(),
+            MAX_PARENT_EDGES,
+            "the map must never exceed the cap"
+        );
+        assert!(
+            map.get("child-0").is_none(),
+            "the oldest edges must be evicted first"
+        );
+        assert_eq!(
+            map.get("child-50").map(String::as_str),
+            Some("parent-50"),
+            "the first 50 edges (child-0..child-49) are gone; child-50 is the oldest survivor"
+        );
+        assert_eq!(
+            map.get(&format!("child-{}", MAX_PARENT_EDGES + 49)).map(String::as_str),
+            Some("parent-100049"),
+            "the newest edge must be retained"
+        );
+
+        // Re-inserting a known child updates its parent without duplicating
+        // the eviction order.
+        let mut single = ParentMap::new();
+        single.insert("child".into(), "parent-1".into());
+        single.insert("child".into(), "parent-2".into());
+        assert_eq!(single.len(), 1);
+        assert_eq!(single.get("child").map(String::as_str), Some("parent-2"));
     }
 
     #[test]
@@ -1506,7 +1593,7 @@ mod tests {
         // and the notification producer is dropped — the terminal state
         // that makes a second close() after a ladder failure safe.
         let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
-        let parent_map = Arc::new(Mutex::new(HashMap::new()));
+        let parent_map = Arc::new(Mutex::new(ParentMap::new()));
         let state = Arc::new(Mutex::new(SharedState::default()));
         let (notifications, _receiver) = broadcast::channel(8);
         let mut client = HarnessClient {
