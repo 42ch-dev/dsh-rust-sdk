@@ -1,3 +1,11 @@
+[workspace]
+members = ["xtask"]
+# The root package is the workspace's only default member; without this,
+# `cargo test` / `cargo build --all-targets` / `cargo clippy --all-targets`
+# at the root skip xtask (release-verify job depends on them covering it).
+default-members = [".", "xtask"]
+resolver = "2"
+
 [package]
 name = "deepseek-harness-sdk"
 version = "0.1.0-alpha.1"
