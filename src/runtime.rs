@@ -254,8 +254,9 @@ fn resolve_runtime_with(
 /// `Config::cordis_config` (non-empty) wins; otherwise a non-empty
 /// `DSH_CORDIS_CONFIG` in `Config::env`, then in the parent environment, is
 /// inherited as-is (not part of the override set); empty strings count as
-/// absent. When nothing effective exists, the bundled default config
-/// ([`bundled_default_config_path`]) is injected.
+/// absent — an empty-string `Config::env` entry is skipped on copy so it can
+/// never clobber a non-empty parent value. When nothing effective exists,
+/// the bundled default config ([`bundled_default_config_path`]) is injected.
 ///
 /// Deliberate divergence from the Python SDK (documented, do not "fix" to
 /// match Python): Python injects the bundled default only when the bundled
@@ -282,12 +283,17 @@ fn compose_env_with(
     resolved_cwd: &Path,
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Result<Vec<(String, String)>, Error> {
-    // Python `env = dict(self.config.env)`: caller extra env first...
+    // Python `env = dict(self.config.env)`: caller extra env first. An
+    // empty-string `DSH_CORDIS_CONFIG` is skipped on copy — the documented
+    // truthiness rule treats empty as absent, so the empty pair must not
+    // clobber a non-empty parent value at spawn (the resolution below
+    // already treats it as absent for the injection decision).
     let mut envs: Vec<(String, String)> = Vec::new();
     if let Some(extra) = &config.env {
         envs.extend(
             extra
                 .iter()
+                .filter(|(key, value)| !(*key == "DSH_CORDIS_CONFIG" && value.is_empty()))
                 .map(|(key, value)| (key.clone(), value.clone())),
         );
     }
@@ -638,6 +644,30 @@ mod tests {
             map.get("DSH_CORDIS_CONFIG").map(String::as_str),
             Some(default_path.to_str().unwrap()),
             "empty user-env DSH_CORDIS_CONFIG counts as absent: {map:?}"
+        );
+    }
+
+    #[test]
+    fn compose_env_empty_user_env_cordis_does_not_clobber_parent_value() {
+        // An empty-string DSH_CORDIS_CONFIG in Config::env counts as absent
+        // (truthiness): it must be skipped on copy so the parent's non-empty
+        // value survives the override set instead of being clobbered by an
+        // empty pair at spawn. The injection decision (no effective config)
+        // is unchanged — the parent value is inherited, so no default is
+        // injected either.
+        let env: HashMap<&'static str, &'static str> =
+            HashMap::from([("DSH_CORDIS_CONFIG", "/parent/cordis.yml")]);
+        let config = Config {
+            env: Some(HashMap::from([("DSH_CORDIS_CONFIG".into(), "".into())])),
+            ..Config::default()
+        };
+        let map: HashMap<_, _> = compose_env_with(&config, Path::new("/work/dir"), lookup(&env))
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert!(
+            !map.contains_key("DSH_CORDIS_CONFIG"),
+            "no empty DSH_CORDIS_CONFIG pair may be emitted; the parent value must be inherited instead: {map:?}"
         );
     }
 
