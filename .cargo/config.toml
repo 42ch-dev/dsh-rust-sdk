@@ -1,0 +1,4 @@
+# Enables `cargo xtask` (release tooling). Never ships in the package:
+# `.cargo/` is not in the crate `include` allowlist.
+[alias]
+xtask = "run -p xtask --"
