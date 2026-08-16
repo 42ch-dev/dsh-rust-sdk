@@ -1146,10 +1146,6 @@ impl ParentMap {
         Self::default()
     }
 
-    fn len(&self) -> usize {
-        self.edges.len()
-    }
-
     fn get(&self, child: &str) -> Option<&String> {
         self.edges.get(child)
     }
@@ -1320,7 +1316,7 @@ mod tests {
             ),
         );
 
-        assert_eq!(map.len(), 2);
+        assert_eq!(map.edges.len(), 2);
         assert_eq!(map.get("child1").map(String::as_str), Some("root"));
         assert_eq!(map.get("child2").map(String::as_str), Some("child1"));
     }
@@ -1335,7 +1331,7 @@ mod tests {
             map.insert(format!("child-{i}"), format!("parent-{i}"));
         }
         assert_eq!(
-            map.len(),
+            map.edges.len(),
             MAX_PARENT_EDGES,
             "the map must never exceed the cap"
         );
