@@ -7,7 +7,7 @@
 //! The reader mirrors the reference transports' tolerance: blank lines and
 //! malformed peer lines (non-JSON or invalid UTF-8) are skipped and logged via
 //! `tracing`, never rejected, so a single garbage line cannot kill the stream.
-//! The only local failure is the >16 MiB framing guard ([`MAX_LINE_LEN`]),
+//! The only local failure is the >16 MiB framing guard (`MAX_LINE_LEN`),
 //! which bounds memory use and is *not* protocol behavior.
 
 use serde_json::Value;
@@ -74,9 +74,9 @@ where
 
     /// Read the next frame as a JSON value.
     ///
-    /// Returns [`Ok(None)`] on EOF. Blank lines and lines that are not valid
+    /// Returns `Ok(None)` on EOF. Blank lines and lines that are not valid
     /// JSON (including invalid UTF-8) are skipped and logged, matching both
-    /// reference clients; a line longer than [`MAX_LINE_LEN`] fails with
+    /// reference clients; a line longer than `MAX_LINE_LEN` fails with
     /// [`Error::SdkProtocol`] as a local framing guard.
     pub async fn read_frame(&mut self) -> Result<Option<Value>, Error> {
         loop {
