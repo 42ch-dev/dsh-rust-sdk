@@ -19,11 +19,17 @@ use serde_json::{Map, Value};
 /// A content block in a user prompt or assistant message, tagged by `type`.
 ///
 /// The known variants (`text`, `reasoning`, `image`, `tool-call`,
-/// `tool-result`) are typed; any other `type` tag — or a block that does not
-/// match a known variant's body — deserializes into [`ContentBlock::Unknown`],
-/// preserving the raw JSON object verbatim. This keeps the type
-/// merge-extensible, mirroring the DSH `ContentBlockMap` (see
+/// `tool-result`) are typed; any other `type` tag deserializes into
+/// [`ContentBlock::Unknown`], preserving the raw JSON object verbatim. This
+/// keeps the type merge-extensible, mirroring the DSH `ContentBlockMap` (see
 /// [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)).
+///
+/// The untagged fallthrough also covers a *known* tag whose body does not
+/// match its variant (e.g. `{"type":"text","text":123}`): serde's
+/// internally-tagged codegen retries the [`ContentBlock::Unknown`] variant
+/// when a tagged variant's content fails to parse, so a malformed known
+/// block is surfaced as data rather than a parse error (locked by
+/// `content_block_known_tag_with_malformed_body_falls_through_to_unknown`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ContentBlock {
@@ -54,13 +60,15 @@ pub enum ContentBlock {
         #[serde(rename = "isError", skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
     },
-    /// Any block whose `type` is not a known variant (or whose body does not
-    /// match one), preserving the raw JSON object verbatim.
+    /// Any block whose `type` tag is not a known variant — or whose body
+    /// does not match its known variant — preserving the raw JSON object
+    /// verbatim.
     ///
-    /// `#[serde(untagged)]` on the variant makes serde fall through to it
-    /// instead of failing when the tag (or the tagged body) does not match —
-    /// the reference clients are untyped here, so a malformed or unknown block
-    /// is surfaced as data, not an error.
+    /// `#[serde(untagged)]` on the variant lets serde fall through to it
+    /// both when the `type` tag matches no known variant and when a known
+    /// variant's body fails to parse; the reference clients are untyped
+    /// here, so an unknown or malformed block is surfaced as data, not an
+    /// error.
     #[serde(untagged)]
     Unknown(Value),
 }
@@ -572,6 +580,55 @@ mod tests {
             raw,
             "Unknown must preserve the raw object verbatim"
         );
+    }
+
+    #[test]
+    fn content_block_known_tag_with_malformed_body_falls_through_to_unknown() {
+        // FIX-8 behavior lock: serde's internally-tagged codegen retries the
+        // untagged variant when a *known* tag's body fails to parse, so a
+        // malformed known block degrades to Unknown (data), not a parse
+        // error — the doc comment's untagged fallthrough semantics. Verified
+        // empirically; locked here so a serde behavior change alerts us.
+        for literal in [
+            json!({"type":"text","text":123}),
+            json!({"type":"tool-call"}), // missing id/name/arguments
+        ] {
+            let block: ContentBlock =
+                serde_json::from_value(literal.clone()).expect("malformed known body -> Unknown");
+            assert!(
+                matches!(block, ContentBlock::Unknown(_)),
+                "malformed known body must degrade to Unknown: {literal}"
+            );
+        }
+        // The wire path (from_str) behaves identically.
+        let block: ContentBlock =
+            serde_json::from_str(r#"{"type":"text","text":123}"#).unwrap();
+        assert!(matches!(block, ContentBlock::Unknown(_)));
+
+        // Through a typed accessor the block parses as Unknown; the
+        // notification itself is preserved.
+        let n: Notification = serde_json::from_value(json!({
+            "method": "subagent.finished",
+            "params": {
+                "provider": "deepseek", "agentId": "a1",
+                "parentSessionId": "p", "childSessionId": "c",
+                "status": "ok", "stopReason": "completed",
+                "lastAssistantMessage": [{"type": "text", "text": 123}]
+            }
+        }))
+        .unwrap();
+        let finished = n
+            .subagent_finished()
+            .expect("accessor dispatch by method")
+            .expect("a malformed known block must not fail the whole payload");
+        match &finished.last_assistant_message {
+            Some(blocks) => assert!(
+                matches!(&blocks[0], ContentBlock::Unknown(_)),
+                "the malformed block is surfaced as Unknown data"
+            ),
+            None => panic!("lastAssistantMessage must be present"),
+        }
+        assert_eq!(n.method, "subagent.finished", "the notification is preserved");
     }
 
     #[test]
