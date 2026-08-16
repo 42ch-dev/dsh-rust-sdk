@@ -129,6 +129,10 @@ pub fn ignore_all() -> Directive {
     Directive::IgnoreAll
 }
 
+pub fn expect_frame(frame: serde_json::Value) -> Directive {
+    Directive::ExpectFrame { frame }
+}
+
 pub fn sleep_ms(ms: u64) -> Directive {
     Directive::SleepMs { ms }
 }

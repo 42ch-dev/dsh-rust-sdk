@@ -10,12 +10,12 @@ mod common;
 use std::time::Duration;
 
 use deepseek_harness_sdk::{ClientTimeouts, ContentBlock, Error, HarnessClient, LaunchSpec};
-use serde_json::json;
+use serde_json::{json, Value};
 
 use common::fake_runtime::{
-    emit, emit_blank, emit_raw, emit_stderr, exit, expect, expect_params, fake_runtime_spec,
-    ignore_all, respond, respond_error, server_info_result, sleep_forever_bin, sleep_ms,
-    test_timeouts, FakeRuntime,
+    emit, emit_blank, emit_raw, emit_stderr, exit, expect, expect_frame, expect_params,
+    fake_runtime_spec, ignore_all, respond, respond_error, server_info_result, sleep_forever_bin,
+    sleep_ms, test_timeouts, FakeRuntime,
 };
 
 /// The canonical client-side session ids used across scenarios.
@@ -331,6 +331,64 @@ async fn spontaneous_death_surfaces_exit_code_and_stderr_tail() {
     }
 
     rt.client.close().await.expect("close after death");
+}
+
+#[tokio::test]
+async fn client_answers_client_directed_requests_with_method_not_found() {
+    // FIX-9: the defensive read-loop path — the peer emits a client-directed
+    // request and asserts the client answers -32601 with the echoed id, for
+    // numeric and string id forms. The peer emits a wire-visible completion
+    // marker (a root-tree session.event) only after both responses were
+    // verified; the test waits for it before sending any request of its own,
+    // so the peer's expect_frames can never read a stray session/prompt line.
+    let mut rt = FakeRuntime::spawn(&[
+        emit_raw(r#"{"jsonrpc":"2.0","id":9,"method":"some.request","params":{"a":1}}"#),
+        expect_frame(json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "error": {"code": -32601, "message": "method not found: some.request"}
+        })),
+        emit_raw(r#"{"jsonrpc":"2.0","id":"probe-1","method":"another.request"}"#),
+        expect_frame(json!({
+            "jsonrpc": "2.0",
+            "id": "probe-1",
+            "error": {"code": -32601, "message": "method not found: another.request"}
+        })),
+        emit(
+            "session.event",
+            json!({"sessionId": ROOT_SESSION, "event": {"type": "test", "text": "exchange-done"}}),
+        ),
+        expect("session/prompt"),
+        respond(json!({"messageId": "probe-ok"})),
+        exit(0),
+    ])
+    .expect("spawn fake runtime");
+
+    let mut subscription = rt.client.subscribe_session_tree(ROOT_SESSION);
+
+    // The marker proves both -32601 exchanges completed (the peer exits 2 on
+    // any response mismatch, so it would never reach the marker).
+    let marker = subscription
+        .recv()
+        .await
+        .expect("exchange-done marker delivered");
+    assert_eq!(
+        marker
+            .payload
+            .get("event")
+            .and_then(|e| e.get("text"))
+            .and_then(Value::as_str),
+        Some("exchange-done")
+    );
+
+    let message_id = rt
+        .client
+        .session_prompt("sess-1", vec![ContentBlock::Text { text: "hi".into() }])
+        .await
+        .expect("the peer must survive the -32601 exchange to answer this");
+    assert_eq!(message_id, "probe-ok");
+
+    rt.client.close().await.expect("clean close");
 }
 
 #[tokio::test]

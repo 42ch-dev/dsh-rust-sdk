@@ -106,6 +106,13 @@ fn main() {
                 }
                 std::process::exit(0);
             }
+            Directive::ExpectFrame { frame } => {
+                let line = read_request(&mut stdin);
+                if line != frame {
+                    eprintln!("fake-runtime: frame mismatch: expected {frame}, got {line}");
+                    std::process::exit(2);
+                }
+            }
             Directive::SleepMs { ms } => std::thread::sleep(Duration::from_millis(ms)),
             Directive::Exit { code } => std::process::exit(code),
         }

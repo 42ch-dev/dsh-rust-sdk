@@ -46,6 +46,10 @@ pub enum Directive {
     /// until the client closes stdin, then exit 0. Used by the
     /// request-timeout scenario.
     IgnoreAll,
+    /// Read one line from the client and assert it deep-equals `frame`
+    /// (asserts the client's wire output — e.g. the `-32601` auto-respond to
+    /// a client-directed request). Exits 2 on mismatch.
+    ExpectFrame { frame: Value },
     /// Sleep, keeping the peer (and its stdout) alive.
     SleepMs { ms: u64 },
     /// Exit with the given code.
