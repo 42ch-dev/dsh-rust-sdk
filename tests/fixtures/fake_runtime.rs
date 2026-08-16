@@ -1,11 +1,16 @@
 //! Fixture binary: a scripted stdio JSON-RPC peer standing in for the DSH
 //! runtime in the integration suite.
 //!
-//! The scenario script — a JSON array of [`directive::Directive`] — is passed
-//! as the sole argv argument. The peer then serves the client: requests
-//! arrive as JSON lines on stdin, frames (responses, notifications, garbage
-//! lines, blank lines) are written to stdout, one per line. Stdout is
-//! flushed after every frame because it is a pipe, not a terminal.
+//! The scenario script — a JSON array of [`directive::Directive`] — is read
+//! from a temp file whose path is passed as `--script-file <path>`: the
+//! harness writes the file, because a large scenario (e.g. the 4097-
+//! notification overflow script, >128 KiB of JSON) exceeds the Linux
+//! single-argument cap (`MAX_ARG_STRLEN`) and fails the spawn with E2BIG
+//! when passed inline. The inline JSON form is retained as a fallback for
+//! manual use. The peer then serves the client: requests arrive as JSON
+//! lines on stdin, frames (responses, notifications, garbage lines, blank
+//! lines) are written to stdout, one per line. Stdout is flushed after
+//! every frame because it is a pipe, not a terminal.
 //!
 //! Registered as the `fake-runtime` bin target; integration tests reach it
 //! via `env!("CARGO_BIN_EXE_fake-runtime")`.
@@ -20,9 +25,28 @@ mod directive;
 use directive::Directive;
 
 fn main() {
-    let script_json = std::env::args()
-        .nth(1)
-        .expect("usage: fake-runtime <scenario-json>");
+    // The harness always passes `--script-file <path>` (the scenario JSON
+    // can exceed the OS single-argument limit); the inline form is a
+    // fallback for manual use.
+    let script_json = match std::env::args().nth(1).as_deref() {
+        Some("--script-file") => {
+            let path = std::env::args()
+                .nth(2)
+                .expect("usage: fake-runtime --script-file <path>");
+            match std::fs::read_to_string(&path) {
+                Ok(script) => script,
+                Err(err) => {
+                    eprintln!("fake-runtime: cannot read scenario file {path:?}: {err}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        Some(inline) => inline.to_string(),
+        None => {
+            eprintln!("usage: fake-runtime <scenario-json> | --script-file <path>");
+            std::process::exit(2);
+        }
+    };
     let script: Vec<Directive> = match serde_json::from_str(&script_json) {
         Ok(script) => script,
         Err(err) => {

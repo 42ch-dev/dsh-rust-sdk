@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use deepseek_harness_sdk::{ClientTimeouts, Config, Error, HarnessClient, LaunchSpec};
+use uuid::Uuid;
 
 #[path = "directive.rs"]
 mod directive;
@@ -41,14 +42,37 @@ pub fn sleep_forever_bin() -> &'static str {
 }
 
 /// A [`LaunchSpec`] running the fake-runtime peer against `script`.
+///
+/// The scenario is written to a unique temp file and passed via
+/// `--script-file` (never inline argv — a large scenario exceeds the Linux
+/// single-argument limit; see [`write_script_file`]).
 pub fn fake_runtime_spec(script: &[Directive]) -> Result<LaunchSpec, serde_json::Error> {
-    let script = serde_json::to_string(script)?;
+    let script_path = write_script_file(script)?;
     Ok(LaunchSpec {
         program: fake_runtime_bin().to_string(),
-        args: vec![script],
+        args: vec![
+            "--script-file".to_string(),
+            script_path.to_string_lossy().into_owned(),
+        ],
         envs: HashMap::new(),
         cwd: None,
     })
+}
+
+/// Serialize `script` to a unique temp file and return its path.
+///
+/// The fixture reads its scenario from a file rather than argv: the
+/// 4097-notification overflow scenario serializes to >128 KiB of JSON, over
+/// the Linux `MAX_ARG_STRLEN` cap for a single argument, which fails the
+/// spawn with `Io(Os { code: 7, kind: ArgumentListTooLong })` when the JSON
+/// is passed inline (macOS is more permissive, which is why local runs
+/// passed). Every scenario goes through the file so the harness behaves
+/// uniformly.
+fn write_script_file(script: &[Directive]) -> Result<PathBuf, serde_json::Error> {
+    let script = serde_json::to_string(script)?;
+    let path = std::env::temp_dir().join(format!("dsh-fake-runtime-{}.json", Uuid::new_v4()));
+    std::fs::write(&path, script).map_err(serde_json::Error::io)?;
+    Ok(path)
 }
 
 /// A spawned fake-runtime client with default test timeouts.
@@ -74,10 +98,17 @@ pub fn test_session_root() -> PathBuf {
 /// A [`Config`] for `DeepSeekHarness::start` that launches the fake-runtime
 /// peer against `script`: Python-parity defaults, the suite's fast
 /// close-ladder timeouts, and the suite's session root.
+///
+/// Like [`fake_runtime_spec`], the scenario is passed via `--script-file`
+/// (temp file), never inline argv.
 pub fn harness_config(script: &[Directive]) -> Result<Config, serde_json::Error> {
-    let script = serde_json::to_string(script)?;
+    let script_path = write_script_file(script)?;
     Ok(Config {
-        launch_args_override: Some(vec![fake_runtime_bin().to_string(), script]),
+        launch_args_override: Some(vec![
+            fake_runtime_bin().to_string(),
+            "--script-file".to_string(),
+            script_path.to_string_lossy().into_owned(),
+        ]),
         timeouts: test_timeouts(),
         session_root: Some(test_session_root().to_string_lossy().into_owned()),
         ..Config::default()
