@@ -63,6 +63,13 @@ Environment injection (Python parity): `DSH_CWD` always; `DSH_SESSION_ROOT`
 effective config, the SDK injects a bundled copy of the runtime's default
 `cordis.yml`.
 
+> **Deliberate divergence from the Python SDK** (documented; do not "fix" to
+> match Python): the Python SDK injects its bundled default `cordis.yml`
+> only when the bundled runtime carrier is used. This crate is bring-your-own
+> runtime (Plan A) — there is no bundled carrier — so the bundled default is
+> injected whenever no effective config exists, **regardless of how the
+> runtime binary was resolved**.
+
 ## `RunResult` alignment
 
 `RunResult` follows the **Python** SDK field set. The TypeScript SDK's
@@ -77,6 +84,9 @@ follows Python, not TypeScript.
 | `events` | yes (root session only) | yes | `events: Vec<serde_json::Value>` |
 | `notifications` | yes (root + descendants, transport order) | yes | `notifications: Vec<Notification>` |
 | `session_root` | yes (Python extension) | no | `session_root: Option<PathBuf>` |
+
+(The table is mirrored in the crate rustdoc, `# Compatibility`; keep the two
+copies in sync.)
 
 `finish_reason` is the last `turn/end`'s `data.reason.kind` inside the
 activity interval of one `Session::run` (`None` when the window has no
@@ -98,6 +108,12 @@ activity interval of one `Session::run` (`None` when the window has no
   (`DeepSeekHarness::close`) mid-turn abandons the in-flight turn. Callers
   needing a bound wrap `Session::run` in `tokio::time::timeout` — this bounds
   the local wait, not the runtime's turn.
+- **Bounded notification buffer.** Tree notifications travel a broadcast
+  channel capped at 4096 with drop-oldest semantics. If a high-volume tree
+  floods more notifications than fit between the SDK's reads, the dropped set
+  can include the inbox receipt or the root-idle notification — `Session::run`
+  then fails fast with `Error::SdkProtocol` instead of hanging forever or
+  returning a silently truncated result.
 - **No Windows support.** Consumed platforms: linux-x64, linux-arm64,
   macos-arm64.
 - **No runtime binary delivery / bundling / download** (planned, see roadmap).

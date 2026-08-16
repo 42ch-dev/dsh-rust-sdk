@@ -27,6 +27,26 @@
 //! | `notifications` (root + descendants) | yes | yes | [`RunResult::notifications`] |
 //! | `session_root` | yes (Python extension) | no | [`RunResult::session_root`] |
 //!
+//! (The table is mirrored in the crate README, `## RunResult alignment`;
+//! keep the two copies in sync.)
+//!
+//! # Environment injection
+//!
+//! [`DeepSeekHarness::start`] injects `DSH_CWD` always, and
+//! `DSH_SESSION_ROOT`, `DSH_CORDIS_CONFIG`, `DEEPSEEK_BASE_URL` /
+//! `DEEPSEEK_API_KEY` only when configured — each override wins over any
+//! inherited value (Python `dict.update` semantics), and the parent
+//! environment is otherwise inherited wholesale. With no effective
+//! `DSH_CORDIS_CONFIG` the SDK injects a bundled copy of the runtime's
+//! default `cordis.yml`.
+//!
+//! **Deliberate divergence from the Python SDK** (documented; do not "fix"
+//! to match Python): the Python SDK injects its bundled default only when
+//! the bundled runtime carrier is used. This crate is bring-your-own runtime
+//! (Plan A) — there is no bundled carrier — so the default is injected
+//! whenever no effective config exists, regardless of how the runtime binary
+//! was resolved.
+//!
 //! The runtime binary is bring-your-own (Plan A): [`DeepSeekHarness::start`]
 //! resolves it from `Config::runtime_bin` / `launch_args_override` or the
 //! `DSH_RUNTIME_BIN` environment variable. This crate never downloads or
@@ -41,6 +61,8 @@
 //!   abandons the turn.
 //! - **No Windows support** (consumed platforms: linux-x64, linux-arm64,
 //!   macos-arm64).
+//! - (The README lists the remaining non-goals: no runtime delivery /
+//!   bundling, no crates.io publish, no TypeScript-parity helper.)
 
 pub mod api;
 pub mod client;
