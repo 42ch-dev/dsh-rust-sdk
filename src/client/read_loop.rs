@@ -192,8 +192,11 @@ pub(super) async fn stderr_loop(
     }
     // Signal the read loop (if it is on the EOF path) that the captured
     // stderr stream has fully drained, so the EOF error can embed the
-    // complete tail.
-    stderr_done.notify_waiters();
+    // complete tail. `notify_one` stores a permit, so the signal is not
+    // lost when the read loop registers its `notified()` future after the
+    // stderr task has already finished (notify_waiters would drop the
+    // signal in that race and stall the EOF path for the join grace).
+    stderr_done.notify_one();
 }
 
 /// Read one line into `buf`, retaining at most `max_bytes` bytes.
