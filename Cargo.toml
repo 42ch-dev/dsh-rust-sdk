@@ -18,3 +18,16 @@ nix = { version = "0.29", features = ["signal"] }
 
 [lints.rust]
 unsafe_code = "forbid"
+
+# Test fixtures compiled as bin targets so integration tests can reach them
+# via CARGO_BIN_EXE_<name> (a plain .rs file under tests/ is not executable).
+# `test = false`: they are run as subprocesses, not as test harnesses.
+[[bin]]
+name = "fake-runtime"
+path = "tests/fixtures/fake_runtime.rs"
+test = false
+
+[[bin]]
+name = "sleep-forever"
+path = "tests/fixtures/sleep_forever.rs"
+test = false
