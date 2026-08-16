@@ -881,20 +881,20 @@ async fn dispatch_frame(
 
 /// The stderr-capture task: keeps the bounded 400-line tail of the runtime's
 /// stderr in the shared state for transport/close diagnostics.
+///
+/// Lines are read through [`read_line_capped`], so a pathological
+/// newline-less stream can never grow the in-flight line buffer past
+/// [`MAX_STDERR_LINE`] — the byte bound is enforced *during* accumulation,
+/// not after (unlike a plain `read_until` + truncate, which would buffer the
+/// whole unterminated line first).
 async fn stderr_loop(stderr: ChildStderr, state: Arc<Mutex<SharedState>>) {
     let mut reader = BufReader::new(stderr);
     let mut line = Vec::new();
     loop {
         line.clear();
-        match reader.read_until(b'\n', &mut line).await {
-            Ok(0) => break, // EOF
-            Ok(_) => {
-                // Local guard: cap one retained line so a pathological
-                // runtime cannot grow the tail without limit (the reference
-                // clients only bound the line count).
-                if line.len() > MAX_STDERR_LINE {
-                    line.truncate(MAX_STDERR_LINE);
-                }
+        match read_line_capped(&mut reader, &mut line, MAX_STDERR_LINE).await {
+            Ok(false) => break, // EOF
+            Ok(true) => {
                 let text = String::from_utf8_lossy(&line);
                 let text = text.trim_end(); // strips the newline and trailing whitespace
                 if !text.is_empty() {
@@ -908,6 +908,68 @@ async fn stderr_loop(stderr: ChildStderr, state: Arc<Mutex<SharedState>>) {
             Err(err) => {
                 tracing::debug!(error = %err, "runtime stderr read failed");
                 break;
+            }
+        }
+    }
+}
+
+/// Read one line into `buf`, retaining at most `max_bytes` bytes.
+///
+/// Returns `Ok(true)` when a line was read (a partial line at EOF counts as
+/// a line, mirroring `readline()`), `Ok(false)` on EOF with nothing
+/// buffered. The first `max_bytes` of a longer line are retained; the
+/// remainder is drained in-flight and discarded, so the caller's buffer is
+/// the only memory a newline-less stream can consume. The same incremental
+/// guard the transport applies to stdout framing, applied to the captured
+/// stderr stream.
+async fn read_line_capped<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut BufReader<R>,
+    buf: &mut Vec<u8>,
+    max_bytes: usize,
+) -> Result<bool, io::Error> {
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(!buf.is_empty());
+        }
+        let newline = available.iter().position(|&b| b == b'\n');
+        let content = newline.unwrap_or(available.len());
+        if buf.len() < max_bytes {
+            let head = content.min(max_bytes - buf.len());
+            buf.extend_from_slice(&available[..head]);
+        }
+        let consumed = newline.map_or(available.len(), |pos| pos + 1);
+        reader.consume(consumed);
+        if newline.is_some() {
+            return Ok(true);
+        }
+        if buf.len() >= max_bytes {
+            // The retained prefix is capped; drain the rest of the line (or
+            // EOF) without buffering, then report the line.
+            drain_line(reader).await?;
+            return Ok(true);
+        }
+    }
+}
+
+/// Consume input up to (and including) the next `\n`, or EOF, without
+/// buffering.
+async fn drain_line<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut BufReader<R>,
+) -> Result<(), io::Error> {
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(()); // EOF; the retained prefix is still reported
+        }
+        match available.iter().position(|&b| b == b'\n') {
+            Some(pos) => {
+                reader.consume(pos + 1);
+                return Ok(());
+            }
+            None => {
+                let len = available.len();
+                reader.consume(len);
             }
         }
     }
@@ -1283,6 +1345,44 @@ mod tests {
                 other => panic!("expected TransportClosed, got {other:?}"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn read_line_capped_bounds_in_flight_allocation_and_preserves_lines() {
+        // FIX-1 regression: a newline-less blob must not grow the capture
+        // buffer; only the first `max_bytes` are retained, the remainder is
+        // drained, and following lines read normally afterwards.
+        use tokio::io::{duplex, AsyncWriteExt};
+
+        let (client_rx, mut server_tx) = duplex(64);
+        let writer = tokio::spawn(async move {
+            let giant = b"x".repeat(100);
+            server_tx.write_all(&giant).await.unwrap();
+            server_tx.write_all(b"\nshort\n").await.unwrap();
+        });
+
+        let mut reader = BufReader::new(client_rx);
+        let mut buf = Vec::new();
+
+        assert!(
+            read_line_capped(&mut reader, &mut buf, 16).await.unwrap(),
+            "the capped prefix of the giant line must be reported as a line"
+        );
+        assert_eq!(buf, b"xxxxxxxxxxxxxxxx", "only the first 16 bytes retained");
+
+        buf.clear();
+        assert!(
+            read_line_capped(&mut reader, &mut buf, 16).await.unwrap(),
+            "the following short line must read intact"
+        );
+        assert_eq!(buf, b"short");
+
+        buf.clear();
+        assert!(
+            !read_line_capped(&mut reader, &mut buf, 16).await.unwrap(),
+            "EOF with nothing buffered must report Ok(false)"
+        );
+        writer.await.unwrap();
     }
 
     #[tokio::test]
