@@ -17,5 +17,12 @@
 //! documented where they occur (planned in plan 02, task 4).
 
 pub mod error;
+pub mod protocol;
 
 pub use error::Error;
+pub use protocol::{
+    ContentBlock, ImageAttachmentRef, IncomingFrame, IncomingRequest, InitializeParams,
+    InitializeResult, JsonRpcErrorBody, JsonRpcId, JsonRpcResponse, JsonRpcResponseOutcome,
+    Notification, ServerInfo, SessionEventNotification, SessionPromptParams, SessionPromptResult,
+    SessionStatusNotification, SubagentFinishedNotification, SubagentStartedNotification,
+};
