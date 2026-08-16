@@ -6,6 +6,8 @@ English | [中文](README.zh.md)
 [![Language](https://img.shields.io/badge/language-Rust-orange)](Cargo.toml)
 [![crates.io](https://img.shields.io/crates/v/deepseek-harness-sdk)](https://crates.io/crates/deepseek-harness-sdk)
 
+See the [CHANGELOG](CHANGELOG.md) for the release history.
+
 Rust client SDK for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 (DSH) runtime: it spawns the official runtime as a subprocess and speaks its
 stdio JSON-RPC 2.0 protocol. One crate, two layers: the high-level
