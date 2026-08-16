@@ -22,6 +22,7 @@
 //! <https://github.com/deepseek-ai/deepseek-harness>.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
@@ -64,7 +65,14 @@ static EXTRACT_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 ///
 /// `provider` and `model` mirror the Python defaults; they may drift
 /// upstream, so treat them as Python-parity defaults.
-#[derive(Debug, Clone)]
+///
+/// Construction is via the public fields plus [`Config::default`]; a
+/// builder-style API is deferred (not part of the v0.1 surface).
+///
+/// `Debug` redacts the credential fields: `api_key` and any
+/// `DEEPSEEK_API_KEY` entry in [`Config::env`] print as `<redacted>`, so a
+/// `{:?}` of the config never leaks the live API key.
+#[derive(Clone)]
 pub struct Config {
     /// Provider name sent to the runtime on `initialize`
     /// (Python default `"deepseek-official"`).
@@ -103,6 +111,44 @@ pub struct Config {
     pub request_timeout: Option<Duration>,
     /// Close-ladder timeouts via plan 01 [`ClientTimeouts`].
     pub timeouts: ClientTimeouts,
+}
+
+impl fmt::Debug for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Config")
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            .field("max_tokens", &self.max_tokens)
+            .field("cwd", &self.cwd)
+            .field("runtime_cwd", &self.runtime_cwd)
+            .field("runtime_bin", &self.runtime_bin)
+            .field("launch_args_override", &self.launch_args_override)
+            .field("cordis_config", &self.cordis_config)
+            .field("base_url", &self.base_url)
+            .field("api_key", &self.api_key.as_deref().map(|_| "<redacted>"))
+            .field("session_root", &self.session_root)
+            .field(
+                "env",
+                &self.env.as_ref().map(|env| {
+                    // A credential carried through Config::env is redacted
+                    // exactly like api_key (the env key is injected into the
+                    // runtime subprocess verbatim).
+                    env.iter()
+                        .map(|(key, value)| {
+                            let value = if key == "DEEPSEEK_API_KEY" {
+                                "<redacted>"
+                            } else {
+                                value.as_str()
+                            };
+                            (key.as_str(), value)
+                        })
+                        .collect::<Vec<(&str, &str)>>()
+                }),
+            )
+            .field("request_timeout", &self.request_timeout)
+            .field("timeouts", &self.timeouts)
+            .finish()
+    }
 }
 
 impl Default for Config {
@@ -220,7 +266,12 @@ fn resolve_runtime_with(
 ///
 /// `resolved_cwd` must be the absolute, resolved working directory (Python:
 /// `str(Path(cwd).resolve())`).
-pub fn compose_env(config: &Config, resolved_cwd: &Path) -> Vec<(String, String)> {
+///
+/// Returns [`Error::Io`] when the bundled default config cannot be extracted
+/// or verified — the required default-config injection never degrades
+/// silently to a config-less launch; [`crate::DeepSeekHarness::start`]
+/// propagates the failure.
+pub fn compose_env(config: &Config, resolved_cwd: &Path) -> Result<Vec<(String, String)>, Error> {
     compose_env_with(config, resolved_cwd, env_var_non_empty)
 }
 
@@ -230,7 +281,7 @@ fn compose_env_with(
     config: &Config,
     resolved_cwd: &Path,
     lookup: impl Fn(&str) -> Option<String>,
-) -> Vec<(String, String)> {
+) -> Result<Vec<(String, String)>, Error> {
     // Python `env = dict(self.config.env)`: caller extra env first...
     let mut envs: Vec<(String, String)> = Vec::new();
     if let Some(extra) = &config.env {
@@ -269,24 +320,14 @@ fn compose_env_with(
                 .cloned()
                 .or_else(|| lookup("DSH_CORDIS_CONFIG").filter(|value| !value.is_empty()));
             if inherited.is_none() {
-                match bundled_default_config_path() {
-                    Ok(path) => {
-                        envs.push((
-                            "DSH_CORDIS_CONFIG".to_string(),
-                            path.to_string_lossy().into_owned(),
-                        ));
-                    }
-                    Err(err) => {
-                        // The fixed signature cannot surface the extraction
-                        // error; launch without an explicit config rather
-                        // than silently mislead.
-                        tracing::warn!(
-                            error = %err,
-                            "failed to extract the bundled default cordis.yml; \
-                             launching without DSH_CORDIS_CONFIG"
-                        );
-                    }
-                }
+                // The bundled default is required when no effective config
+                // exists; an extraction/verification failure propagates
+                // (fail-visible — no silent config-less launch).
+                let default = bundled_default_config_path()?;
+                envs.push((
+                    "DSH_CORDIS_CONFIG".to_string(),
+                    default.to_string_lossy().into_owned(),
+                ));
             }
         }
     }
@@ -296,19 +337,31 @@ fn compose_env_with(
     if let Some(key) = &config.api_key {
         envs.push(("DEEPSEEK_API_KEY".to_string(), key.clone()));
     }
-    envs
+    Ok(envs)
 }
 
 /// Path of the SDK-bundled default runtime configuration
 /// (`assets/cordis.yml`, a byte-identical copy of the official DSH default),
 /// extracted into the system temp directory on first use.
 ///
-/// The path is cached for the process lifetime, but existence is re-checked
-/// on every call so a temp cleaner removing the file between launches
-/// triggers a re-extraction. The write is atomic (temp sibling + rename).
+/// The path is cached for the process lifetime, but the file is **byte
+/// verified against the `include_bytes!` source on every use**: a missing,
+/// unreadable, or mismatched file (e.g. a locally poisoned file at the
+/// deterministic temp path on a shared machine, or a temp cleaner removing
+/// the file between launches) triggers an atomic re-extraction. The write is
+/// atomic (unique temp sibling + rename), so the destination only ever
+/// appears via rename and is always complete. On a sticky temp dir a foreign
+/// file cannot be renamed over — the [`Error::Io`] propagates (fail-visible,
+/// never a config-less launch).
 pub fn bundled_default_config_path() -> Result<PathBuf, Error> {
     let path: &Path = &DEFAULT_CONFIG_PATH;
-    if !path.is_file() {
+    // Byte-verify any existing file against the include_bytes! source on
+    // every use: the deterministic temp path is world-writable on shared
+    // machines, so an unverified file could be a locally poisoned config
+    // injected into a process holding DEEPSEEK_API_KEY. An unreadable file
+    // counts as unverified too.
+    let verified = std::fs::read(path).is_ok_and(|bytes| bytes == DEFAULT_CORDIS_YML);
+    if !verified {
         // Write to a unique temp sibling and rename (atomic) so a crashed
         // writer can never leave a truncated config behind, and concurrent
         // first-use extractions never collide on the temp path. The
@@ -464,6 +517,7 @@ mod tests {
         };
         let map: HashMap<_, _> =
             compose_env_with(&config, Path::new("/work/dir"), lookup(&empty_env))
+                .unwrap()
                 .into_iter()
                 .collect();
         assert_eq!(
@@ -498,6 +552,7 @@ mod tests {
             Path::new("/work/dir"),
             lookup(&empty_env),
         )
+        .unwrap()
         .into_iter()
         .collect();
         assert_eq!(
@@ -519,6 +574,7 @@ mod tests {
             HashMap::from([("DSH_CORDIS_CONFIG", "/inherited/cordis.yml")]);
         let map: HashMap<_, _> =
             compose_env_with(&Config::default(), Path::new("/work/dir"), lookup(&env))
+                .unwrap()
                 .into_iter()
                 .collect();
         assert_eq!(
@@ -534,6 +590,7 @@ mod tests {
         let env: HashMap<&'static str, &'static str> = HashMap::from([("DSH_CORDIS_CONFIG", "")]);
         let map: HashMap<_, _> =
             compose_env_with(&Config::default(), Path::new("/work/dir"), lookup(&env))
+                .unwrap()
                 .into_iter()
                 .collect();
         let default_path = bundled_default_config_path().unwrap();
@@ -553,6 +610,7 @@ mod tests {
         };
         let map: HashMap<_, _> =
             compose_env_with(&config, Path::new("/work/dir"), lookup(&empty_env))
+                .unwrap()
                 .into_iter()
                 .collect();
         let default_path = bundled_default_config_path().unwrap();
@@ -572,6 +630,7 @@ mod tests {
         };
         let map: HashMap<_, _> =
             compose_env_with(&config, Path::new("/work/dir"), lookup(&empty_env))
+                .unwrap()
                 .into_iter()
                 .collect();
         let default_path = bundled_default_config_path().unwrap();
@@ -598,6 +657,7 @@ mod tests {
         };
         let map: HashMap<_, _> =
             compose_env_with(&config, Path::new("/work/dir"), lookup(&empty_env))
+                .unwrap()
                 .into_iter()
                 .collect();
         assert_eq!(map.get("FOO").map(String::as_str), Some("bar"));
@@ -615,10 +675,10 @@ mod tests {
     // --- bundled_default_config_path -------------------------------------
 
     #[test]
-    fn bundled_default_config_is_extracted_cached_and_recreated() {
+    fn bundled_default_config_is_extracted_byte_verified_and_recreated() {
         // First use extracts to a readable temp file byte-identical to the
         // include_bytes! source. (Sequenced in one test: the temp file is
-        // shared process state, so a parallel test removing it would race.)
+        // shared process state, so a parallel test mutating it would race.)
         let first = bundled_default_config_path().unwrap();
         assert!(
             first.is_file(),
@@ -641,5 +701,73 @@ mod tests {
             "re-extracts when a temp cleaner removed the file"
         );
         assert_eq!(std::fs::read(&third).unwrap(), DEFAULT_CORDIS_YML);
+        // A locally poisoned file at the deterministic temp path (the qc3
+        // W-2 threat model: world-writable temp dir on shared machines) is
+        // detected by the byte verification on the next use and atomically
+        // re-extracted, so the injected config is always the SDK's own
+        // asset.
+        std::fs::write(&first, b"attacker-controlled cordis.yml").unwrap();
+        let fourth = bundled_default_config_path().unwrap();
+        assert_eq!(first, fourth);
+        assert_eq!(
+            std::fs::read(&fourth).unwrap(),
+            DEFAULT_CORDIS_YML,
+            "a mismatched cached file must be re-extracted (byte-verified)"
+        );
+    }
+
+    // --- Config Debug redaction ------------------------------------------
+
+    #[test]
+    fn config_debug_redacts_api_key_and_env_credential() {
+        let config = Config {
+            api_key: Some("sk-super-secret".into()),
+            env: Some(HashMap::from([(
+                "DEEPSEEK_API_KEY".into(),
+                "env-super-secret".into(),
+            )])),
+            ..Config::default()
+        };
+        let rendered = format!("{config:?}");
+        assert!(
+            !rendered.contains("sk-super-secret"),
+            "Config Debug must redact api_key: {rendered}"
+        );
+        assert!(
+            !rendered.contains("env-super-secret"),
+            "Config Debug must redact a DEEPSEEK_API_KEY env entry: {rendered}"
+        );
+        assert!(
+            rendered.contains("<redacted>"),
+            "the redaction marker must be visible: {rendered}"
+        );
+    }
+
+    // --- resolve_runtime: empty runtime_bin fallthrough -------------------
+
+    #[test]
+    fn resolve_empty_runtime_bin_counts_as_absent_and_falls_through_to_env() {
+        // runtime_bin: Some("") is falsy (Python truthiness) → the parent
+        // DSH_RUNTIME_BIN route applies...
+        let env: HashMap<&'static str, &'static str> =
+            HashMap::from([("DSH_RUNTIME_BIN", "env-bin")]);
+        let config = Config {
+            runtime_bin: Some("".into()),
+            ..Config::default()
+        };
+        assert_eq!(
+            resolve_runtime_with(&config, lookup(&env)).unwrap(),
+            RuntimeLaunch {
+                program: "env-bin".into(),
+                args: vec![]
+            }
+        );
+        // ...and with no env either, the empty bin still counts as absent →
+        // RuntimeNotFound (never an unlaunchable empty program).
+        let empty_env = HashMap::new();
+        assert!(matches!(
+            resolve_runtime_with(&config, lookup(&empty_env)),
+            Err(Error::RuntimeNotFound(_))
+        ));
     }
 }
