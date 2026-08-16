@@ -1,0 +1,353 @@
+name: Release
+
+# PR-driven publish. Merging a `release v<version>` PR (opened by the Release
+# prep workflow) creates the annotated tag; the tag then runs the verify +
+# GitHub Release + crates.io publish pass. There is deliberately no human
+# `git tag && git push --tags` publish path for NEW versions (tag creation is
+# PR-gated); the push:tags entry exists so a tag pushed by the PR path (or a
+# backfilled tag such as v0.1.0-alpha.1) runs the full verify/release/publish
+# pass on its own.
+#
+# Top-level only so Trusted Publishing OIDC binds to the workflow filename
+# `release.yml`; do not call this via workflow_call.
+#
+# Zero registry secrets: crates.io auth is pure OIDC Trusted Publishing
+# (id-token: write on the publish-crates job only). No job other than
+# publish-crates holds id-token: write. PR labels arrive in the event payload,
+# so no pull-requests scope is needed anywhere. Permissions are minimized per
+# job: top-level contents: read; tag/release contents: write; publish-crates
+# contents: read + id-token: write.
+
+on:
+  push:
+    tags:
+      - v*
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: tag
+    # PR event only, and label + head-ref are both required: label alone must
+    # not publish — a mislabeled ordinary PR fails this guard (job skipped,
+    # nothing publishes) instead of shipping a tag.
+    if: >
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.merged == true &&
+      contains(join(github.event.pull_request.labels.*.name, ','), 'release') &&
+      startsWith(github.event.pull_request.head.ref, 'release/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the annotated tag
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - name: Checkout merge commit
+        # actions/checkout@v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+
+      - name: Setup Rust toolchain
+        # dtolnay/rust-toolchain@stable (2026-07-16)
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+
+      - name: Resolve version, cross-check PR title, create annotated tag
+        id: tag
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          # Cargo.toml at the merge commit is the single source of truth; the
+          # PR title (`release v<version>`) must agree — a hand-edited PR fails
+          # here before tagging instead of shipping a mismatched tag.
+          VERSION="$(
+            cargo metadata --no-deps --format-version 1 | python3 -c "import json,sys; meta=json.load(sys.stdin); print(next(p['version'] for p in meta['packages'] if p['name']=='deepseek-harness-sdk' and p.get('source') is None))"
+          )"
+          TITLE_VER="${TITLE#release v}"
+          if [ "$TITLE_VER" != "$VERSION" ]; then
+            echo "::error::PR title version \"${TITLE_VER}\" does not match Cargo.toml version \"${VERSION}\". Re-run Release prep for v${VERSION} instead of hand-editing the PR."
+            exit 1
+          fi
+          TAG="v${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --tags --force origin
+
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            # Annotated-only policy: an existing annotated tag is idempotent
+            # (continue); an existing lightweight tag is an error.
+            TYPE="$(git cat-file -t "refs/tags/${TAG}")"
+            if [ "$TYPE" != "tag" ]; then
+              echo "::error::Tag ${TAG} exists but is not annotated (found ${TYPE}). Replace it with an annotated tag or pick a higher version."
+              exit 1
+            fi
+            echo "Annotated tag ${TAG} already exists; continuing Release (idempotent)."
+          else
+            git tag -a "$TAG" -m "release ${TAG}" "${{ github.event.pull_request.merge_commit_sha }}"
+            git push origin "refs/tags/${TAG}"
+            echo "Created and pushed annotated tag ${TAG}"
+          fi
+
+  resolve-tag:
+    name: resolve-tag
+    runs-on: ubuntu-latest
+    needs: [tag]
+    # Single source of RELEASE_TAG for both entries: the tag-push entry, or
+    # the PR entry only when the tag job succeeded.
+    if: >
+      always() && (
+        (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+        (github.event_name == 'pull_request' && needs.tag.result == 'success')
+      )
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - name: Resolve release tag
+        id: resolve
+        run: |
+          set -euo pipefail
+          case "${{ github.event_name }}" in
+            push)
+              TAG="${{ github.ref_name }}"
+              ;;
+            pull_request)
+              TAG="${{ needs.tag.outputs.tag }}"
+              ;;
+            *)
+              echo "::error::Unsupported event: ${{ github.event_name }}"
+              exit 1
+              ;;
+          esac
+          if [ -z "$TAG" ]; then
+            echo "::error::Empty release tag"
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "Resolved release tag ${TAG}"
+
+  rust:
+    name: rust (fmt, clippy, build, test)
+    needs: [resolve-tag]
+    # Keep the graph alive on the push entry, where `tag` never ran.
+    if: ${{ always() && needs.resolve-tag.result == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
+    steps:
+      - name: Checkout
+        # actions/checkout@v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+
+      - name: Setup Rust toolchain
+        # dtolnay/rust-toolchain@stable (2026-07-16)
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        # Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+        with:
+          shared-key: dsh-rust-sdk
+          workspaces: .
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Build
+        run: cargo build --all-targets
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+  verify-version:
+    name: verify-version
+    needs: [resolve-tag]
+    if: ${{ always() && needs.resolve-tag.result == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.resolve-tag.outputs.version }}
+    steps:
+      - name: Checkout
+        # actions/checkout@v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+
+      - name: Setup Rust toolchain
+        # dtolnay/rust-toolchain@stable (2026-07-16)
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+
+      - name: Require annotated release tag
+        run: |
+          set -euo pipefail
+          git fetch --tags --force origin
+          TYPE="$(git cat-file -t "refs/tags/${RELEASE_TAG}")"
+          if [ "$TYPE" != "tag" ]; then
+            echo "::error::Release tag ${RELEASE_TAG} must be an annotated tag (git tag -a), found ${TYPE}."
+            exit 1
+          fi
+
+      - name: Assert Cargo.toml version matches tag
+        run: |
+          set -euo pipefail
+          VERSION="$(
+            cargo metadata --no-deps --format-version 1 | python3 -c "import json,sys; meta=json.load(sys.stdin); print(next(p['version'] for p in meta['packages'] if p['name']=='deepseek-harness-sdk' and p.get('source') is None))"
+          )"
+          if [ "$VERSION" != "$RELEASE_VERSION" ]; then
+            echo "::error::Cargo.toml version ${VERSION} does not match tag version ${RELEASE_VERSION}."
+            exit 1
+          fi
+          echo "Cargo.toml and tag agree on ${VERSION}"
+
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    needs:
+      - resolve-tag
+      - rust
+      - verify-version
+    if: ${{ always() && needs.resolve-tag.result == 'success' && needs.rust.result == 'success' && needs.verify-version.result == 'success' }}
+    permissions:
+      contents: write # create the GitHub Release
+    env:
+      RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.resolve-tag.outputs.version }}
+    steps:
+      - name: Checkout
+        # actions/checkout@v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+
+      - name: Setup Rust toolchain
+        # dtolnay/rust-toolchain@stable (2026-07-16)
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+
+      - name: Extract changelog notes
+        id: notes
+        run: |
+          set -euo pipefail
+          NOTES_FILE="${RUNNER_TEMP}/release-notes-${RELEASE_VERSION}.md"
+          cargo xtask release-notes "$RELEASE_VERSION" > "$NOTES_FILE"
+          # Refuse-empty (T3 review carry): release-notes exits 0 for a
+          # header-only/bulletless section, so additionally require at least
+          # one `- ` bullet line — fail BEFORE the action runs, never ship an
+          # empty GitHub Release.
+          if ! grep -Eq '^[[:space:]]*- ' "$NOTES_FILE"; then
+            echo "::error::Changelog section for ${RELEASE_VERSION} has no bullet lines; refusing to create an empty GitHub Release."
+            exit 1
+          fi
+          echo "notes_file=${NOTES_FILE}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        # softprops/action-gh-release@v2.6.2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_TAG }}
+          # body_path: multiline notes never pass through GITHUB_OUTPUT.
+          body_path: ${{ steps.notes.outputs.notes_file }}
+          draft: false
+          # Owner decision: every release publishes as a regular GitHub
+          # Release (prerelease: false) — the alpha line is the shipping
+          # channel and crates.io has no dist-tags.
+          prerelease: false
+
+  publish-crates:
+    name: publish-crates
+    runs-on: ubuntu-latest
+    needs:
+      - resolve-tag
+      - release
+    if: ${{ always() && needs.resolve-tag.result == 'success' && needs.release.result == 'success' }}
+    permissions:
+      contents: read
+      id-token: write # OIDC for crates.io Trusted Publishing — only this job
+    env:
+      RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.resolve-tag.outputs.version }}
+    steps:
+      - name: Checkout tag
+        # actions/checkout@v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          # What verify tested is what publishes.
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+
+      - name: Setup Rust toolchain
+        # dtolnay/rust-toolchain@stable (2026-07-16)
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+
+      # Idempotent publish (spoke publish-crate.sh semantics, inlined — a
+      # committed shell script would violate the Rust-only tooling boundary):
+      # the job is safe to re-run — after Trusted Publisher config, or a
+      # whole-workflow re-run after a later step failed. No transient-5xx
+      # retry loop: this is a single crate and the idempotent re-run is the
+      # retry.
+      - name: Skip if already published
+        id: published
+        run: |
+          set -euo pipefail
+          if curl -fsS -o /dev/null -A "dsh-rust-sdk-release (github.com/42ch-dev/dsh-rust-sdk)" \
+            "https://crates.io/api/v1/crates/deepseek-harness-sdk/${RELEASE_VERSION}"; then
+            echo "deepseek-harness-sdk@${RELEASE_VERSION} already on crates.io — skip publish"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Authenticate to crates.io
+        if: ${{ steps.published.outputs.skip == 'false' }}
+        id: crates-io-auth
+        # rust-lang/crates-io-auth-action@v1.0.5 — short-lived OIDC token,
+        # consumed only by the publish step below (post-step revoke).
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18
+
+      - name: Publish deepseek-harness-sdk
+        if: ${{ steps.published.outputs.skip == 'false' }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
+        run: |
+          set -euo pipefail
+          set +e
+          out="$(cargo publish -p deepseek-harness-sdk 2>&1)"
+          status=$?
+          set -e
+          printf '%s\n' "${out}"
+          if [ "${status}" -eq 0 ]; then
+            exit 0
+          fi
+          # Publish race: the version landed between the pre-check and the
+          # publish — treat as success (idempotent re-run).
+          if printf '%s\n' "${out}" | grep -q 'already exists on crates.io'; then
+            echo "deepseek-harness-sdk@${RELEASE_VERSION} already on crates.io (publish race) — ok"
+            exit 0
+          fi
+          exit "${status}"
