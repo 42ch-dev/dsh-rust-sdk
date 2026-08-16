@@ -26,6 +26,12 @@ pub struct NotificationSubscription {
     pub(super) parent_map: Arc<Mutex<ParentMap>>,
     pub(super) state: Arc<Mutex<SharedState>>,
     pub(super) root: String,
+    /// Set whenever the receiver has fallen behind the broadcast capacity
+    /// (dropped-oldest notifications are irrecoverable). Consumed by
+    /// `NotificationSubscription::take_lagged` so callers whose protocol
+    /// depends on every notification (e.g. the `Session::run` activity
+    /// interval) can fail fast instead of trusting a truncated stream.
+    pub(super) lagged: bool,
 }
 
 impl NotificationSubscription {
@@ -36,7 +42,9 @@ impl NotificationSubscription {
     /// the channel (or the client) is closed, [`Error::TransportClosed`] is
     /// returned with the process diagnostics. A receiver that falls behind
     /// the broadcast capacity logs the drop and continues (documented
-    /// drop-oldest behavior).
+    /// drop-oldest behavior), but records the lag — see
+    /// `NotificationSubscription::take_lagged` — so callers whose protocol
+    /// depends on a lossless stream can fail fast.
     pub async fn recv(&mut self) -> Result<Notification, Error> {
         let Some(receiver) = self.receiver.as_mut() else {
             return Err(closed_error(
@@ -53,6 +61,7 @@ impl NotificationSubscription {
                         "DeepSeek Harness runtime closed",
                     ));
                 }
+                DrainOutcome::Lagged => self.lagged = true,
                 DrainOutcome::Empty => {}
             }
             let closed = lock(&self.state).closed;
@@ -83,6 +92,7 @@ impl NotificationSubscription {
                     ));
                 }
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    self.lagged = true;
                     tracing::debug!(
                         skipped,
                         "notification subscription fell behind; dropped oldest \
@@ -92,12 +102,21 @@ impl NotificationSubscription {
             }
         }
     }
+
+    /// Whether the receiver has fallen behind the broadcast capacity at
+    /// least once since the last call — any dropped notification is
+    /// irrecoverable, so the stream may be missing notifications. Consumed
+    /// on read (returns `false` on subsequent calls until the next lag).
+    pub(crate) fn take_lagged(&mut self) -> bool {
+        std::mem::take(&mut self.lagged)
+    }
 }
 
 enum DrainOutcome {
     Matched(Notification),
     Empty,
     Closed,
+    Lagged,
 }
 
 /// Pop one matching notification from the receiver's queue without waiting.
@@ -122,7 +141,91 @@ fn drain_queued(
                     "notification subscription fell behind; dropped oldest \
                      notifications (documented drop-oldest behavior)"
                 );
+                return DrainOutcome::Lagged;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{json, Map, Value};
+    use tokio::sync::broadcast;
+
+    use super::*;
+
+    /// A root-session `session.event` notification payload.
+    fn event_notification(text: &str) -> Notification {
+        let mut payload = Map::new();
+        payload.insert("sessionId".to_string(), json!("root"));
+        payload.insert("event".to_string(), json!({"type": "test", "text": text}));
+        Notification {
+            method: "session.event".to_string(),
+            payload,
+        }
+    }
+
+    /// A subscription over a fresh broadcast channel of `capacity`, with an
+    /// empty tree (the root always passes the filter) and a live client
+    /// state.
+    fn subscription_with_capacity(
+        capacity: usize,
+    ) -> (broadcast::Sender<Notification>, NotificationSubscription) {
+        let (tx, rx) = broadcast::channel(capacity);
+        let subscription = NotificationSubscription {
+            receiver: Some(rx),
+            parent_map: Arc::new(Mutex::new(ParentMap::default())),
+            state: Arc::new(Mutex::new(SharedState::default())),
+            root: "root".to_string(),
+            lagged: false,
+        };
+        (tx, subscription)
+    }
+
+    #[tokio::test]
+    async fn overflow_sets_lagged_and_take_lagged_consumes_it() {
+        // Capacity 1: the second send evicts the first, so the receiver
+        // falls behind by exactly one notification — the low-level overflow
+        // `Session::run`'s `ensure_no_lag` fail-fast protects against.
+        let (tx, mut subscription) = subscription_with_capacity(1);
+
+        tx.send(event_notification("first")).expect("send");
+        tx.send(event_notification("second")).expect("send");
+
+        // recv() surfaces the Lagged (recording it on the flag) and still
+        // delivers the retained notification.
+        let notification = subscription
+            .recv()
+            .await
+            .expect("the retained notification is delivered");
+        assert_eq!(
+            notification
+                .payload
+                .get("event")
+                .and_then(|e| e.get("text"))
+                .and_then(Value::as_str),
+            Some("second"),
+            "the first notification was dropped; the second is delivered"
+        );
+        assert!(subscription.lagged, "an overflow must set the lag flag");
+        assert!(
+            subscription.take_lagged(),
+            "take_lagged reports the recorded lag"
+        );
+        assert!(
+            !subscription.take_lagged(),
+            "take_lagged is consumed on read until the next lag"
+        );
+
+        // A stream that keeps up after the lag leaves the flag clear.
+        tx.send(event_notification("third")).expect("send");
+        subscription
+            .recv()
+            .await
+            .expect("the third notification is delivered");
+        assert!(
+            !subscription.take_lagged(),
+            "no overflow since the last read → the flag stays clear"
+        );
     }
 }

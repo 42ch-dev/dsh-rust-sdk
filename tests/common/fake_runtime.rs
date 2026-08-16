@@ -7,9 +7,10 @@
 //! requests, so the same harness serves any client-level scenario.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
-use deepseek_harness_sdk::{ClientTimeouts, Error, HarnessClient, LaunchSpec};
+use deepseek_harness_sdk::{ClientTimeouts, Config, Error, HarnessClient, LaunchSpec};
 
 #[path = "directive.rs"]
 mod directive;
@@ -62,6 +63,41 @@ impl FakeRuntime {
         let client = HarnessClient::spawn(fake_runtime_spec(script)?, test_timeouts())?;
         Ok(Self { client })
     }
+}
+
+/// The session root injected into every high-level harness in this suite, so
+/// `RunResult::session_root` is observable without touching the disk.
+pub fn test_session_root() -> PathBuf {
+    PathBuf::from("/tmp/dsh-sdk-test-session-root")
+}
+
+/// A [`Config`] for `DeepSeekHarness::start` that launches the fake-runtime
+/// peer against `script`: Python-parity defaults, the suite's fast
+/// close-ladder timeouts, and the suite's session root.
+pub fn harness_config(script: &[Directive]) -> Result<Config, serde_json::Error> {
+    let script = serde_json::to_string(script)?;
+    Ok(Config {
+        launch_args_override: Some(vec![fake_runtime_bin().to_string(), script]),
+        timeouts: test_timeouts(),
+        session_root: Some(test_session_root().to_string_lossy().into_owned()),
+        ..Config::default()
+    })
+}
+
+/// The canonical `Session::run` script prefix: the `initialize` handshake
+/// (with the Python-parity provider/model defaults locked on the wire) and
+/// the `session/prompt` round trip yielding `message_id`. Scenario bodies
+/// extend this with their notification sequence.
+pub fn run_prefix(message_id: &str) -> Vec<Directive> {
+    vec![
+        expect_params(
+            "initialize",
+            json!({"provider": "deepseek-official", "model": "deepseek-v4-flash"}),
+        ),
+        respond(server_info_result()),
+        expect("session/prompt"),
+        respond(json!({"messageId": message_id})),
+    ]
 }
 
 /// The canonical `initialize` success result served by happy-path scripts:
