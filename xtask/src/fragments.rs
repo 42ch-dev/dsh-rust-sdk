@@ -35,22 +35,39 @@ const CANONICAL_CATEGORIES: [&str; 6] = [
     "Security",
 ];
 
-/// Collect fragments from `dir`, skipping `README.md` and dotfiles.
-/// The returned order is unspecified; `build_section_body` owns ordering.
+/// Collect fragments from `dir`, skipping `README.md`, dotfiles, and any
+/// non-`.md` entry (spec §2: a fragment is a slug filename ending `.md`).
+/// Non-file entries (subdirectories) are skipped with a warning so a
+/// directory that looks like a fragment is not silently invisible to the
+/// collection or the empty-refusal gate. A non-UTF-8 filename is a hard
+/// error: the later archive `fs::rename` would otherwise target a lossy
+/// name and fail confusingly. The returned order is unspecified;
+/// `build_section_body` owns ordering.
 pub fn collect(dir: &Path) -> Result<Vec<Fragment>> {
     let mut fragments = Vec::new();
     let entries =
         fs::read_dir(dir).with_context(|| format!("reading fragment dir {}", dir.display()))?;
     for entry in entries {
         let entry = entry.with_context(|| format!("reading entry in {}", dir.display()))?;
-        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        let name = entry
+            .file_name()
+            .to_str()
+            .with_context(|| format!("fragment filename is not valid UTF-8: {}", path.display()))?
+            .to_string();
         if name == "README.md" || name.starts_with('.') {
             continue;
         }
         if !entry.file_type().context("stat fragment")?.is_file() {
+            eprintln!(
+                "warning: skipping non-file entry `{name}` in {}",
+                dir.display()
+            );
             continue;
         }
-        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
         let content = fs::read_to_string(&path)
             .with_context(|| format!("reading fragment {}", path.display()))?;
         fragments.push(parse_fragment(&name, &content)?);
@@ -136,7 +153,13 @@ fn split_frontmatter(name: &str, content: &str) -> Result<(String, String)> {
     let mut category = DEFAULT_CATEGORY.to_string();
     for line in &lines[1..close] {
         if let Some(value) = line.trim().strip_prefix("category:") {
-            let value = value.trim();
+            // qc2-F005: YAML inline comments (`category: Added # release`)
+            // must not leak into the rendered `### <Category>` heading.
+            let value = value
+                .split_once(" #")
+                .map(|(v, _)| v)
+                .unwrap_or(value)
+                .trim();
             if value.is_empty() {
                 bail!("fragment `{name}`: empty `category:` value");
             }
@@ -218,6 +241,47 @@ mod tests {
         let fragments = collect(dir.path()).unwrap();
         assert_eq!(fragments.len(), 1);
         assert_eq!(fragments[0].name, "real.md");
+    }
+
+    #[test]
+    fn collect_skips_non_md_files() {
+        // qc2-F003: only `.md` files are fragments per spec §2; a stray
+        // `notes.txt` with bullets must not render into the changelog.
+        let dir = tempdir().unwrap();
+        write(dir.path(), "notes.txt", "- not a fragment\n");
+        write(dir.path(), "real.md", "- real\n");
+        let fragments = collect(dir.path()).unwrap();
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(fragments[0].name, "real.md");
+    }
+
+    #[test]
+    fn collect_strips_category_yaml_comment() {
+        // qc2-F005: `category: Added # release` renders `### Added`,
+        // not `### Added # release`.
+        let dir = tempdir().unwrap();
+        write(
+            dir.path(),
+            "commented.md",
+            "---\ncategory: Added # release\n---\n- bullet\n",
+        );
+        let fragments = collect(dir.path()).unwrap();
+        assert_eq!(fragments[0].category, "Added");
+    }
+
+    #[test]
+    fn collect_empty_category_value_errors() {
+        let dir = tempdir().unwrap();
+        write(
+            dir.path(),
+            "empty-cat.md",
+            "---\ncategory:\n---\n- bullet\n",
+        );
+        let err = collect(dir.path()).unwrap_err().to_string();
+        assert!(
+            err.contains("empty `category:`"),
+            "error should name the empty category: {err}"
+        );
     }
 
     #[test]

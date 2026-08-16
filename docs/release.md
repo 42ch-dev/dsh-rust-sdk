@@ -9,8 +9,9 @@ Reference provenance: the entry/tag/verify/publish architecture and crates.io
 Trusted Publishing follow the `spoke` release workflows (`release.yml` /
 `new-release.yml`); the fragment/changelog scheme follows `dsh-llm-fallbacks`
 (`.changes/`, `prepare-release.ts`, its `docs/release.md`). This document is
-the shipped SSOT for this repository — when it and the workflows disagree,
-the workflows win.
+the shipped operator SSOT for this repository: the workflows are
+authoritative for automation behavior, and this doc must stay aligned with
+them (update both together whenever either changes).
 
 ## Release model
 
@@ -28,9 +29,10 @@ Two steps, PR-driven, zero secrets:
 There is deliberately **no `push: tags` human-publish path**: a manual
 `git tag && git push --tags` does not publish, because the tag's tree must
 contain `release.yml`, which only release-merged commits have. (The
-`push: tags: v*` trigger exists so tags created by the PR path — or a
-backfilled tag such as `v0.1.0-alpha.1` — run the full verify/release/publish
-pass on their own.)
+`push: tags: v*` trigger exists so tags created by the PR path run the full
+verify/release/publish pass on their own. A backfilled tag triggers the
+workflow only when its tree contains `release.yml` — `v0.1.0-alpha.1` at
+`0166c79` predates the pipeline, so pushing it cannot fire the workflow.)
 
 **Dev-time version discipline:** during development `Cargo.toml` does not
 move. Changes accumulate as unreleased fragments; the version is resolved by
@@ -109,7 +111,10 @@ Before the first pipeline publish of `0.1.0-alpha.2`:
      needed) — no surprise product-code files
 4. **Merge.** Merging is what publishes. After merge, watch the **Release**
    workflow: tag → verify (fmt, build, clippy, test) → GitHub Release →
-   `cargo publish`.
+   `cargo publish`. Merging launches the Release workflow twice by design —
+   the PR `closed` path and the `push: tags` entry fired by the tag the merge
+   creates; the `release` concurrency group serializes the passes and the
+   publish step is idempotent, so the duplicate pass is harmless.
 
 ## What failure looks like
 
@@ -119,10 +124,12 @@ Failures are loud; there is no silent skip and no token fallback.
 |---------|-------------------------|----------|
 | Empty `.changes/unreleased/` (`README.md` / `.gitkeep` ignored) | Release prep fails; no PR opened | Add a fragment, re-dispatch |
 | Invalid SemVer, version ≤ current `Cargo.toml`, or git tag `v<version>` already exists | Release prep fails; no PR | Fix the version input, re-dispatch |
-| CHANGELOG section for the version is empty (no `- ` bullet) | Release prep refuses to open the PR; the Release workflow also fails **before** GitHub Release and before publish | Do not ship an empty release; fix fragments / re-run Release prep |
+| `CHANGELOG.md` has no `## [<version>]` section | `release-validate` fails; Release prep aborts; no PR | Fix the changelog, re-run Release prep |
+| CHANGELOG section present but header-only (no `- ` bullet) | Release prep's bullet grep refuses to open the PR; the Release workflow's bullet grep also fails **before** GitHub Release and before publish | Do not ship an empty release; fix fragments / re-run Release prep |
 | crates.io Trusted Publisher missing or removed | `publish-crates` fails with an OIDC/auth error. Tag + verify + GitHub Release may already have succeeded. There is no `CARGO_REGISTRY_TOKEN` secret to fall back to | Configure the Trusted Publisher (once-step 1), retry the `publish-crates` job. **Accepted intermediate** for the first `0.1.0-alpha.2` run: this does not un-ship the iteration; the run is complete only when crates.io `max_version` is `0.1.0-alpha.2` |
 | Existing **lightweight** tag `v<version>` | `tag` job errors (annotated-only policy) | Replace with an annotated tag, or pick a higher version |
 | Existing **annotated** tag `v<version>` | `tag` job continues (idempotent) | Inspect; do not re-publish the same crates.io version (fix-forward) |
+| Release PR merged without the `release` label (or head branch not `release/v*`) | `tag` job is skipped, so every downstream job is skipped — nothing publishes. **A skipped `tag` job means a mislabeled PR, not a quiet success** | Add the `release` label (or fix the branch name) and re-run the Release workflow; or re-run Release prep to regenerate the PR |
 
 Release prep never pushes to `main`. A closed or unmerged release PR is the
 rollback gate: nothing is published until merge.
@@ -132,7 +139,7 @@ rollback gate: nothing is published until merge.
 | Situation | Action |
 |-----------|--------|
 | Release prep stage (PR open, not merged) | Close the PR, or re-run Release prep — it regenerates the branch and PR idempotently (force-with-lease push; a closed PR is reopened; a merged PR fails loudly). Nothing is published until merge |
-| Publish succeeded, tag / GitHub Release steps failed | Re-run the failed jobs — the publish step is idempotent (crates.io pre-check + tolerates `already exists on crates.io`), so a re-run is safe and green — or manually `git tag -a v<version>` and create the GitHub Release from `cargo xtask release-notes <version>` |
+| Publish succeeded, tag / GitHub Release steps failed | Re-run the failed jobs — the publish step is idempotent (crates.io pre-check + tolerates `is already uploaded`), so a re-run is safe and green — or manually `git tag -a v<version>` and create the GitHub Release from `cargo xtask release-notes <version>` |
 | Published wrong content | crates.io forbids re-publishing a version; fix-forward to the next version |
 | Wrong version merged | Treat as released if the publish ran; otherwise close the PR / re-run Release prep |
 | Trusted Publisher missing after merge | Tag + GitHub Release may already exist; configure the Trusted Publisher and retry `publish-crates` only (accepted intermediate for `0.1.0-alpha.2`) |
@@ -146,6 +153,11 @@ The xtask CLI mirrors what the workflows run, for local rehearsal:
 # explicit version). Mutates the tree in place; does NOT commit and does NOT
 # refuse a dirty tree — commit the four paths like the workflow does:
 #   git add Cargo.toml CHANGELOG.md .changes/ Cargo.lock
+#
+# prepare is not transactional: a failure during archival can leave
+# Cargo.toml bumped and only some fragments archived. On any failed run,
+# restore the tree and re-run:
+#   git restore Cargo.toml CHANGELOG.md .changes/
 cargo xtask release-prepare --auto            # 0.1.0-alpha.1 -> 0.1.0-alpha.2
 cargo xtask release-prepare 0.1.0-alpha.2     # explicit
 

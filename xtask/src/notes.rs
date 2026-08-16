@@ -1,5 +1,18 @@
 //! `release-notes`: extract a version's CHANGELOG section to feed the
 //! GitHub Release body (spec §5).
+//!
+//! Refuse-empty policy — three layers, defense-in-depth (qc1-S003):
+//! 1. `prepare` refuses when `.changes/unreleased/` yields zero collectable
+//!    fragments (xtask/src/prepare.rs);
+//! 2. `extract` below only requires the `## [<version>]` header to exist
+//!    (a section can be header-only);
+//! 3. the workflows are the bullet gate — both release-prep.yml and
+//!    release.yml run `grep -Eq '^[[:space:]]*- '` over `release-notes`
+//!    output and fail before acting when no `- ` bullet is present.
+//!
+//! `extract` deliberately does NOT require bullets: keeping it a pure
+//! section lookup leaves the bullet gate in the workflows where the
+//! "never ship an empty Release/PR" decision is enforced.
 
 /// Extract the full section for `version` from `changelog`: the
 /// `## [<version>]` header line and everything after it up to (but not

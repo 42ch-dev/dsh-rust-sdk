@@ -4,9 +4,15 @@ name: Release
 # prep workflow) creates the annotated tag; the tag then runs the verify +
 # GitHub Release + crates.io publish pass. There is deliberately no human
 # `git tag && git push --tags` publish path for NEW versions (tag creation is
-# PR-gated); the push:tags entry exists so a tag pushed by the PR path (or a
-# backfilled tag such as v0.1.0-alpha.1) runs the full verify/release/publish
-# pass on its own.
+# PR-gated); the push:tags entry exists so a tag pushed by the PR path runs
+# the full verify/release/publish pass on its own.
+#
+# Double-run parity (qc1-S002): merging a release PR launches this workflow
+# twice — the PR `closed` path (tag job -> resolve-tag) and the `push: tags`
+# entry fired by the tag the merge creates. Both passes are serialized by the
+# `concurrency: group: release` lock and the publish step is idempotent
+# (crates.io pre-check + publish-race tolerance), so the duplicate pass is
+# safe and green by design, not an accident to fix.
 #
 # Top-level only so Trusted Publishing OIDC binds to the workflow filename
 # `release.yml`; do not call this via workflow_call.
@@ -66,6 +72,9 @@ jobs:
         id: tag
         env:
           TITLE: ${{ github.event.pull_request.title }}
+          # qc2-F001: event payload never splices into run: shell source —
+          # the merge SHA arrives via env and is quoted on use.
+          MERGE_COMMIT_SHA: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
           set -euo pipefail
           # Cargo.toml at the merge commit is the single source of truth; the
@@ -97,7 +106,7 @@ jobs:
             fi
             echo "Annotated tag ${TAG} already exists; continuing Release (idempotent)."
           else
-            git tag -a "$TAG" -m "release ${TAG}" "${{ github.event.pull_request.merge_commit_sha }}"
+            git tag -a "$TAG" -m "release ${TAG}" "${MERGE_COMMIT_SHA}"
             git push origin "refs/tags/${TAG}"
             echo "Created and pushed annotated tag ${TAG}"
           fi
@@ -119,17 +128,22 @@ jobs:
     steps:
       - name: Resolve release tag
         id: resolve
+        env:
+          # qc2-F001: expression injection guard — event-derived values
+          # (event name, ref name) pass through env, never into shell source.
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          case "${{ github.event_name }}" in
+          case "${EVENT_NAME}" in
             push)
-              TAG="${{ github.ref_name }}"
+              TAG="${REF_NAME}"
               ;;
             pull_request)
               TAG="${{ needs.tag.outputs.tag }}"
               ;;
             *)
-              echo "::error::Unsupported event: ${{ github.event_name }}"
+              echo "::error::Unsupported event: ${EVENT_NAME}"
               exit 1
               ;;
           esac
@@ -227,6 +241,9 @@ jobs:
   release:
     name: release
     runs-on: ubuntu-latest
+    # qc3-F001: bound the job so a hung step cannot park the serialized
+    # `release` concurrency group for the 6h default.
+    timeout-minutes: 30
     needs:
       - resolve-tag
       - rust
@@ -282,6 +299,9 @@ jobs:
   publish-crates:
     name: publish-crates
     runs-on: ubuntu-latest
+    # qc3-F001: bound the job so a hung `cargo publish` cannot park the
+    # serialized `release` concurrency group for the 6h default.
+    timeout-minutes: 30
     needs:
       - resolve-tag
       - release
@@ -315,7 +335,10 @@ jobs:
         id: published
         run: |
           set -euo pipefail
+          # qc3-F001: bounded network wait — a hung call must not park the
+          # serialized `release` concurrency group for the 6h job default.
           if curl -fsS -o /dev/null -A "dsh-rust-sdk-release (github.com/42ch-dev/dsh-rust-sdk)" \
+            --max-time 30 --connect-timeout 10 \
             "https://crates.io/api/v1/crates/deepseek-harness-sdk/${RELEASE_VERSION}"; then
             echo "deepseek-harness-sdk@${RELEASE_VERSION} already on crates.io — skip publish"
             echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -345,8 +368,11 @@ jobs:
             exit 0
           fi
           # Publish race: the version landed between the pre-check and the
-          # publish — treat as success (idempotent re-run).
-          if printf '%s\n' "${out}" | grep -q 'already exists on crates.io'; then
+          # publish — treat as success (idempotent re-run). crates.io's
+          # actual duplicate-version error is `crate version \`X\` is
+          # already uploaded` (HTTP 400); match that substring, not the
+          # old `already exists on crates.io` phrasing it never emitted.
+          if printf '%s\n' "${out}" | grep -q 'is already uploaded'; then
             echo "deepseek-harness-sdk@${RELEASE_VERSION} already on crates.io (publish race) — ok"
             exit 0
           fi

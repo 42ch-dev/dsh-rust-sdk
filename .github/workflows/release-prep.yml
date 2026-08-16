@@ -118,6 +118,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           BRANCH="release/v${{ steps.ver.outputs.version }}"
+          # Invariant (qc1-F002): the Checkout step above used `ref: main`
+          # and no fetch happened since, so HEAD == origin/main here — the
+          # prepared working-tree changes (Cargo.toml, CHANGELOG.md,
+          # .changes/) survive `git checkout -B` because it switches to a
+          # branch at the same commit (nothing to reset). Keep HEAD ==
+          # origin/main before this step: changing the startpoint, adding a
+          # fetch, or checking out a different ref would silently discard
+          # the prepare output.
           git checkout -B "$BRANCH" origin/main
           # Explicit paths only: the release PR must contain exactly the
           # version/changelog/fragment changes, never stray files. Cargo.lock

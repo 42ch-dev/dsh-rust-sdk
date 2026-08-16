@@ -4,6 +4,13 @@
 //! Mutates the worktree in place; never commits and never refuses a dirty
 //! tree (the workflow commits). Every function takes the repo root
 //! explicitly so tests can pass `tempfile` fixture trees.
+//!
+//! Not transactional (qc1-S004/qc3-F002): all guards run before any
+//! mutation, but a mid-flight failure after `write_package_version` (e.g. an
+//! IO error during the archive rename loop) can leave `Cargo.toml` bumped
+//! and only some fragments archived. The workflow path is immune (ephemeral
+//! runner, failure aborts before commit/push); the local-rehearsal recovery
+//! is `git restore Cargo.toml CHANGELOG.md .changes/` (docs/release.md).
 
 use std::fs;
 use std::path::Path;
@@ -35,6 +42,15 @@ pub fn prepare(root: &Path, version: Option<Version>) -> Result<ResolvedVersion>
     let current = read_package_version(&cargo_toml)?;
     let version = match version {
         Some(v) => {
+            // qc2-F004/qc3-F003: build metadata (`0.1.0-alpha.2+build.5`)
+            // is not publishable — crates.io rejects it and git refs cannot
+            // contain `+`, so it would fail late at tag/publish after the
+            // manifest was already bumped. Reject it at the shared guard.
+            if !v.build.is_empty() {
+                bail!(
+                    "version `{v}` has build metadata; crates.io cannot publish it and git tags cannot carry `+`"
+                );
+            }
             assert_greater(&v, &current)?;
             v
         }
@@ -426,6 +442,68 @@ mod tests {
             );
         }
         assert_eq!(cargo_version(dir.path()).to_string(), "0.1.0-alpha.1");
+    }
+
+    #[test]
+    fn prepare_rejects_build_metadata_on_explicit_input() {
+        // qc2-F004/qc3-F003: `+build` is not publishable (crates.io
+        // rejects it, git refs cannot carry `+`); the guard must fire
+        // before the manifest is bumped.
+        let dir = fixture_tree();
+        write(dir.path(), "CHANGELOG.md", CHANGELOG_WITH_UNRELEASED);
+        write(
+            &dir.path().join(".changes/unreleased"),
+            "a-feature.md",
+            "- add a\n",
+        );
+        let version = Version::parse("0.1.0-alpha.2+build.5").unwrap();
+        let err = prepare(dir.path(), Some(version)).unwrap_err().to_string();
+        assert!(
+            err.contains("build metadata"),
+            "error should name build metadata: {err}"
+        );
+        assert_eq!(cargo_version(dir.path()).to_string(), "0.1.0-alpha.1");
+    }
+
+    #[test]
+    fn prepare_collect_error_leaves_cargo_toml_unchanged() {
+        // T2-M2: a fragment parse failure aborts `collect`; all guards run
+        // before any mutation, so Cargo.toml stays untouched.
+        let dir = fixture_tree();
+        write(dir.path(), "CHANGELOG.md", CHANGELOG_WITH_UNRELEASED);
+        write(
+            &dir.path().join(".changes/unreleased"),
+            "broken.md",
+            "---\ncategory: Added\n- no closing fence\n",
+        );
+        let err = prepare(dir.path(), None).unwrap_err().to_string();
+        assert!(
+            err.contains("closing fence"),
+            "error should name the parse failure: {err}"
+        );
+        assert_eq!(cargo_version(dir.path()).to_string(), "0.1.0-alpha.1");
+    }
+
+    #[test]
+    fn committed_changelog_alpha1_section_matches_archive_assembly() {
+        // qc1-S006: the committed `## [0.1.0-alpha.1]` CHANGELOG section
+        // must be exactly what §2 assembly produces from
+        // `.changes/archive/0.1.0-alpha.1/` — a hand-edited changelog that
+        // drifts from the archive fails here.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let changelog = fs::read_to_string(root.join("CHANGELOG.md")).unwrap();
+        let section = crate::notes::extract(&changelog, "0.1.0-alpha.1")
+            .expect("committed CHANGELOG.md has a 0.1.0-alpha.1 section");
+        // Drop the `## [0.1.0-alpha.1] - <date>` header and the separator
+        // blank line, then compare the body with assembly from the archive.
+        let body = section
+            .lines()
+            .skip(1)
+            .skip_while(|l| l.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let archive = collect(&root.join(".changes/archive/0.1.0-alpha.1")).unwrap();
+        assert_eq!(body, build_section_body(&archive).trim_end());
     }
 
     #[test]
