@@ -96,6 +96,15 @@ const STDERR_TAIL_LIMIT: usize = 400;
 /// truncated (the reference clients only bound the *line count*).
 const MAX_STDERR_LINE: usize = 64 * 1024;
 
+/// Upper bound, in bytes, for the stderr tail embedded in one error string.
+///
+/// The retained tail can reach `STDERR_TAIL_LIMIT × MAX_STDERR_LINE`
+/// (≈ 25 MiB); embedding all of it into every transport error would make a
+/// chatty runtime's failures expensive to format and log. Only the newest
+/// [`MAX_EMBEDDED_STDERR_BYTES`] are embedded (whole lines, oldest dropped
+/// first, newest line truncated if it alone overflows).
+const MAX_EMBEDDED_STDERR_BYTES: usize = 8 * 1024;
+
 /// Grace for joining the reader/stderr tasks after the runtime process has
 /// been reaped (Python joins with 0.5s; a stuck task is aborted so its pipes
 /// are released).
@@ -986,17 +995,47 @@ fn closed_error(state: &SharedState, reason: &str) -> Error {
         parts.push(format!("exit code: {code}"));
     }
     if !state.stderr_tail.is_empty() {
-        parts.push(format!(
-            "stderr tail:\n{}",
-            state
-                .stderr_tail
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-                .join("\n")
-        ));
+        parts.push(format!("stderr tail:\n{}", embed_stderr_tail(&state.stderr_tail)));
     }
     Error::TransportClosed(parts.join("\n"))
+}
+
+/// Join the retained stderr tail for embedding in an error string, bounded
+/// to the newest [`MAX_EMBEDDED_STDERR_BYTES`] bytes so a chatty runtime
+/// cannot bloat every transport error. Whole lines are preferred (oldest
+/// dropped first); the newest line is kept even when it alone exceeds the
+/// budget, truncated to the budget.
+fn embed_stderr_tail(tail: &VecDeque<String>) -> String {
+    // Pick the newest span of whole lines that fits the budget, always
+    // keeping the newest line.
+    let mut keep_from = tail.len();
+    let mut bytes = 0usize;
+    for (i, line) in tail.iter().enumerate().rev() {
+        let line_bytes = line.len().saturating_add(1); // + '\n' separator
+        if bytes + line_bytes > MAX_EMBEDDED_STDERR_BYTES && keep_from != tail.len() {
+            break;
+        }
+        bytes += line_bytes;
+        keep_from = i;
+    }
+    let mut out = tail
+        .iter()
+        .skip(keep_from)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("\n");
+    // A single newest line overflowing the budget keeps its tail (the
+    // newest context) rather than being dropped entirely.
+    if out.len() > MAX_EMBEDDED_STDERR_BYTES {
+        let start = out.len() - MAX_EMBEDDED_STDERR_BYTES;
+        let cut = out
+            .char_indices()
+            .map(|(i, _)| i)
+            .find(|&i| i >= start)
+            .unwrap_or(out.len());
+        out = out[cut..].to_string();
+    }
+    out
 }
 
 /// Build the transport-closed error for a failed close-ladder tier: the tier
@@ -1278,6 +1317,50 @@ mod tests {
             &notification("subagent.started", &[("parentSessionId", json!(7))],),
             "root"
         ));
+    }
+
+    #[test]
+    fn embedded_stderr_tail_is_byte_capped_keeping_newest() {
+        // FIX-7: the tail embedded in an error string is bounded to
+        // MAX_EMBEDDED_STDERR_BYTES, preferring whole newest lines.
+        let short = VecDeque::from([
+            "line-1".to_string(),
+            "line-2".to_string(),
+            "line-3".to_string(),
+        ]);
+        assert_eq!(
+            embed_stderr_tail(&short),
+            "line-1\nline-2\nline-3",
+            "a tail under the budget is embedded verbatim"
+        );
+
+        // Many lines overflowing the budget: the newest lines survive, the
+        // oldest are dropped, and the embedded text stays within the cap.
+        let wide: VecDeque<String> = (0..1000).map(|i| format!("line-{i}")).collect();
+        let embedded = embed_stderr_tail(&wide);
+        assert!(
+            embedded.len() <= MAX_EMBEDDED_STDERR_BYTES,
+            "embedded tail must respect the byte cap, got {} bytes",
+            embedded.len()
+        );
+        assert!(
+            embedded.ends_with("line-999"),
+            "the newest line must be retained"
+        );
+        assert!(
+            !embedded.contains("line-0"),
+            "the oldest lines must be dropped"
+        );
+
+        // A single newest line alone overflows the budget: its tail (the
+        // newest context) is kept, truncated to the budget.
+        let giant = VecDeque::from(["z".repeat(MAX_EMBEDDED_STDERR_BYTES + 100)]);
+        let embedded = embed_stderr_tail(&giant);
+        assert_eq!(embedded.len(), MAX_EMBEDDED_STDERR_BYTES);
+        assert!(
+            embedded.ends_with(&"z".repeat(MAX_EMBEDDED_STDERR_BYTES)),
+            "the truncated tail must keep the newest bytes"
+        );
     }
 
     #[test]
