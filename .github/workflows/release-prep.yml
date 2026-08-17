@@ -160,11 +160,15 @@ jobs:
             cat "$NOTES_FILE"
           } > "$BODY_FILE"
 
-          # State-aware PR handling: an open PR is updated; a closed PR is
-          # reopened first (`gh pr edit` silently keeps closed PRs closed — a
-          # re-run after rollback would otherwise look successful while leaving
-          # no open PR); none -> create. `gh pr reopen` fails loudly on a
-          # merged PR instead of silently leaving the release blocked.
+          # State-aware PR handling: an open PR is updated; a closed-unmerged
+          # PR is reopened first (`gh pr edit` silently keeps closed PRs
+          # closed — a re-run after rollback would otherwise look successful
+          # while leaving no open PR); none -> create. A MERGED PR for this
+          # head (a previous prep whose release was rolled back) is NOT
+          # reopenable (`gh pr reopen` fails on merged PRs), and its branch
+          # was force-pushed with fresh prep output, so it falls through to
+          # `gh pr create` — re-prep after a rollback opens a new release PR.
+          # gh's JSON `state` distinguishes them: "OPEN" | "CLOSED" | "MERGED".
           OPEN_NUM="$(gh pr list --head "$BRANCH" --state open --json number -q '.[0].number' 2>/dev/null || true)"
           if [ -n "$OPEN_NUM" ]; then
             gh pr edit "$OPEN_NUM" --title "$TITLE" --body-file "$BODY_FILE" --add-label release
@@ -172,7 +176,10 @@ jobs:
             exit 0
           fi
 
-          CLOSED_NUM="$(gh pr list --head "$BRANCH" --state closed --json number -q '.[0].number' 2>/dev/null || true)"
+          # Only closed-unmerged PRs are reopen candidates: select state
+          # CLOSED explicitly so a MERGED PR falls through to create below
+          # (the length guard keeps this expression empty-exit-0 on any jq).
+          CLOSED_NUM="$(gh pr list --head "$BRANCH" --state closed --json number,state --jq '[.[] | select(.state=="CLOSED")] | if length > 0 then .[0].number else empty end' 2>/dev/null || true)"
           if [ -n "$CLOSED_NUM" ]; then
             gh pr reopen "$CLOSED_NUM"
             gh pr edit "$CLOSED_NUM" --title "$TITLE" --body-file "$BODY_FILE" --add-label release
