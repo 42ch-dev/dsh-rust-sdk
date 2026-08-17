@@ -82,63 +82,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## 运行时获取
 
-运行时为自带；SDK 只负责定位它。DSH 运行时是通过 npm 分发的 Node.js
-程序（`dsh-jsonrpc-agent`）；上游还通过 Python wheel 分发自包含单文件
-可执行文件。任选一条途径：
+运行时为自带；SDK 只负责定位它。先分清概念：交互式 `dsh` CLI
+（`@deepseek-ai/dsh`——即你从 `npx` / 全局安装认识的那个程序）**不是**
+本 SDK 的运行时；它不提供 SDK 所讲的 stdio JSON-RPC 协议。SDK 需要的是
+无头 JSON-RPC 运行时（`dsh-jsonrpc-agent`）——官方 Python SDK 捆绑的
+同一个运行时载体。上游以两种方式分发它：Python SDK 平台 wheel 中的
+自包含单文件可执行文件，以及 npm 分发的 Node.js 程序。任选一条途径：
 
-### 途径 A —— npm（默认）
+### 途径 A —— 预构建可执行文件（默认）
 
-运行时 bin 发布为
-[`@deepseek-ai/dsh-sdk-jsonrpc-demo`](https://www.npmjs.com/package/@deepseek-ai/dsh-sdk-jsonrpc-demo)
-（bin：`dsh-jsonrpc-agent`）。需要 Node.js ≥ 22.19。两种跑法任选：
-
-- **`npx`（免安装）**——`npx` 本身就是程序，因此用
-  `Config::launch_args_override`：
-
-  ```rust
-  Config {
-      launch_args_override: Some(vec![
-          "npx".into(),
-          "--yes".into(),
-          "@deepseek-ai/dsh-sdk-jsonrpc-demo".into(),
-      ]),
-      ..Config::default()
-  }
-  ```
-
-- **`npm install -g`**——bin 上 `PATH`：
-
-  ```sh
-  npm install -g @deepseek-ai/dsh-sdk-jsonrpc-demo
-  export DSH_RUNTIME_BIN=dsh-jsonrpc-agent
-  ```
-
-无论哪种跑法，npm bin 都从**配置项目**（即 `cordis.yml` 所在目录）解析
-配置中点名的插件，因此该途径还需要一个装有插件集的小型配置项目：
-
-```sh
-mkdir dsh-runtime && cd dsh-runtime
-npm init -y >/dev/null
-npm install @deepseek-ai/dsh-sdk-jsonrpc-server @deepseek-ai/dsh-agent-spine-demo \
-  @deepseek-ai/dsh-llm-deepseek @deepseek-ai/dsh-session-persistence-jsonl \
-  @deepseek-ai/dsh-session-checkpoint-policy @deepseek-ai/dsh-subprocess-local \
-  @deepseek-ai/dsh-bash-local @deepseek-ai/dsh-fs-local
-# 把默认 cordis.yml 放到 package.json 旁（见下文），然后：
-export DSH_CORDIS_CONFIG="$PWD/cordis.yml"
-```
-
-配置文件用上游默认配置——DSH 仓库中的
-[`python/sdk-runtime/src/deepseek_harness_runtime/runtime/cordis.yml`](https://github.com/deepseek-ai/deepseek-harness/blob/master/python/sdk-runtime/src/deepseek_harness_runtime/runtime/cordis.yml)
-——或自行组合（保留 `@deepseek-ai/dsh-sdk-jsonrpc-server` 条目；缺了它
-运行时不提供任何服务）。
-
-> **npm 途径注意：** npm bin 没有内建插件树——插件加载失败是致命的，而
-> SDK 捆绑的默认配置（解压到临时目录，旁边没有 `node_modules`）无法满足
-> 插件解析。这就是本途径要求显式设置 `DSH_CORDIS_CONFIG` 的原因。
-
-### 途径 B —— 预构建单文件可执行文件（wheel）
-
-上游把同一运行时打包为自包含的 Node.js 单文件可执行文件（运行时不需要
+上游把运行时打包为自包含的 Node.js 单文件可执行文件（运行时不需要
 Node.js；插件树已内嵌），经 Python SDK 的 `deepseek-harness-runtime-bin`
 平台 wheel 分发（linux-x64、linux-arm64、macos-arm64）：
 
@@ -155,13 +108,66 @@ export DSH_RUNTIME_BIN="$(python -c 'import deepseek_harness_runtime as r; print
 本途径配合 SDK 注入的捆绑默认 `cordis.yml`（见下文）开箱即用：不需要
 `DSH_CORDIS_CONFIG`。
 
+### 途径 B —— npm（免构建）
+
+运行时 bin 发布为
+[`@deepseek-ai/dsh-sdk-jsonrpc-demo`](https://www.npmjs.com/package/@deepseek-ai/dsh-sdk-jsonrpc-demo)
+（bin：`dsh-jsonrpc-agent`）。需要 Node.js ≥ 22.19。请从 **`next`
+dist-tag** 安装：这些包的 `latest` tag 目前指向一套更旧的混合版本矩阵，
+而 `next` 会把整套解析到同一条发布线（即交互式 `dsh` CLI 所在的发布线）。
+两种跑法任选：
+
+- **`npx`（免安装）**——`npx` 本身就是程序，因此用
+  `Config::launch_args_override`：
+
+  ```rust
+  Config {
+      launch_args_override: Some(vec![
+          "npx".into(),
+          "--yes".into(),
+          "@deepseek-ai/dsh-sdk-jsonrpc-demo@next".into(),
+      ]),
+      ..Config::default()
+  }
+  ```
+
+- **`npm install -g`**——bin 上 `PATH`：
+
+  ```sh
+  npm install -g @deepseek-ai/dsh-sdk-jsonrpc-demo@next
+  export DSH_RUNTIME_BIN=dsh-jsonrpc-agent
+  ```
+
+无论哪种跑法，npm bin 都从**配置项目**（即 `cordis.yml` 所在目录）解析
+配置中点名的插件，因此该途径还需要一个装有插件集的小型配置项目：
+
+```sh
+mkdir dsh-runtime && cd dsh-runtime
+npm init -y >/dev/null
+npm install @deepseek-ai/dsh-sdk-jsonrpc-server@next @deepseek-ai/dsh-agent-spine-demo@next \
+  @deepseek-ai/dsh-llm-deepseek@next @deepseek-ai/dsh-session-persistence-jsonl@next \
+  @deepseek-ai/dsh-session-checkpoint-policy@next @deepseek-ai/dsh-subprocess-local@next \
+  @deepseek-ai/dsh-bash-local@next @deepseek-ai/dsh-fs-local@next
+# 把默认 cordis.yml 放到 package.json 旁（见下文），然后：
+export DSH_CORDIS_CONFIG="$PWD/cordis.yml"
+```
+
+配置文件用上游默认配置——DSH 仓库中的
+[`python/sdk-runtime/src/deepseek_harness_runtime/runtime/cordis.yml`](https://github.com/deepseek-ai/deepseek-harness/blob/master/python/sdk-runtime/src/deepseek_harness_runtime/runtime/cordis.yml)
+——或自行组合（保留 `@deepseek-ai/dsh-sdk-jsonrpc-server` 条目；缺了它
+运行时不提供任何服务）。
+
+> **npm 途径注意：** npm bin 没有内建插件树——插件加载失败是致命的，而
+> SDK 捆绑的默认配置（解压到临时目录，旁边没有 `node_modules`）无法满足
+> 插件解析。这就是本途径要求显式设置 `DSH_CORDIS_CONFIG` 的原因。
+
 ### SDK 如何解析运行时（参考）
 
 二进制解析遵循 Python `HarnessClient` 的对齐语义，外加 Rust 独有的
 `DSH_RUNTIME_BIN` 途径：
 
 1. `Config::launch_args_override`（非空）—— 完整 argv，原样使用
-   （途径 A 的 npx 变体即用此项）；
+   （途径 B 的 npx 变体即用此项）；
 2. `Config::runtime_bin`；
 3. 父进程环境中的 `DSH_RUNTIME_BIN`；
 4. 否则返回 `Error::RuntimeNotFound`，其错误消息会点名上述获取途径。
@@ -174,8 +180,8 @@ export DSH_RUNTIME_BIN="$(python -c 'import deepseek_harness_runtime as r; print
 （与官方默认逐字节一致），首次使用时解压到系统临时目录，且每次使用都会
 做字节校验——运行时在缺少显式配置时拒绝启动，因此该注入是必需的；解压
 或校验失败会以 `Error::Io` 传播（绝不会静默地无配置启动）。注意
-[npm 途径注意](#途径a--npm默认)：捆绑默认配置只有在运行时自带插件树
-（途径 B 的可执行文件）时才能完成插件解析；用 npm bin 时请务必自行提供
+[npm 途径注意](#途径-b--npm免构建)：捆绑默认配置只有在运行时自带插件树
+（途径 A 的可执行文件）时才能完成插件解析；用 npm bin 时请务必自行提供
 `DSH_CORDIS_CONFIG`。
 
 > **与 Python SDK 的刻意分歧**（已记录；请勿"修正"为与 Python 一致）：
@@ -314,8 +320,8 @@ SIGKILL → 等待。该阶梯幂等，是无条件清理（任何一层的失�
 ## 平台支持与 MSRV
 
 SDK 本体是纯 Rust、平台负担很小；平台矩阵由所消费的运行时决定。途径 A
-（npm）在一切能跑 Node.js ≥ 22.19 的平台上可用；途径 B（wheel 可执行
-文件）分发 linux-x64、linux-arm64、macos-arm64。**不支持 Windows**：
+（预构建可执行文件）分发 linux-x64、linux-arm64、macos-arm64；途径 B
+（npm）在一切能跑 Node.js ≥ 22.19 的平台上可用。**不支持 Windows**：
 上游没有 Windows 运行时构建。
 
 MSRV：当前 stable Rust（`Cargo.toml` 未固定最低版本；本 crate 跟随稳定版
