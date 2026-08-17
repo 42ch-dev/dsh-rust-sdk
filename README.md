@@ -85,66 +85,18 @@ point those variables at a local proxy.
 
 ## Runtime acquisition
 
-The runtime is bring-your-own; the SDK only locates it. The DSH runtime is an
-npm-distributed Node.js program (`dsh-jsonrpc-agent`); upstream also ships a
-self-contained single-file executable via a Python wheel. Pick one route:
+The runtime is bring-your-own; the SDK only locates it. One distinction
+first: the interactive `dsh` CLI (`@deepseek-ai/dsh` — the program you may
+know from `npx` / global installs) is **not** this SDK's runtime; it does not
+serve the stdio JSON-RPC protocol the SDK speaks. The SDK needs the headless
+JSON-RPC runtime (`dsh-jsonrpc-agent`) — the same runtime carrier the
+official Python SDK bundles. Upstream ships it two ways: a self-contained
+single-file executable (via the Python SDK's platform wheel) and an
+npm-distributed Node.js program. Pick one route:
 
-### Route A — npm (default)
+### Route A — prebuilt executable (default)
 
-The runtime bin is published as
-[`@deepseek-ai/dsh-sdk-jsonrpc-demo`](https://www.npmjs.com/package/@deepseek-ai/dsh-sdk-jsonrpc-demo)
-(bin: `dsh-jsonrpc-agent`). Requires Node.js ≥ 22.19. Run it either way:
-
-- **`npx` (no install)** — `npx` itself is the program, so use
-  `Config::launch_args_override`:
-
-  ```rust
-  Config {
-      launch_args_override: Some(vec![
-          "npx".into(),
-          "--yes".into(),
-          "@deepseek-ai/dsh-sdk-jsonrpc-demo".into(),
-      ]),
-      ..Config::default()
-  }
-  ```
-
-- **`npm install -g`** — the bin lands on `PATH`:
-
-  ```sh
-  npm install -g @deepseek-ai/dsh-sdk-jsonrpc-demo
-  export DSH_RUNTIME_BIN=dsh-jsonrpc-agent
-  ```
-
-Either way, the npm bin resolves the plugins named in `cordis.yml` from the
-**config project** — the directory the config file lives in — so this route
-also needs a small config project with the plugin set installed:
-
-```sh
-mkdir dsh-runtime && cd dsh-runtime
-npm init -y >/dev/null
-npm install @deepseek-ai/dsh-sdk-jsonrpc-server @deepseek-ai/dsh-agent-spine-demo \
-  @deepseek-ai/dsh-llm-deepseek @deepseek-ai/dsh-session-persistence-jsonl \
-  @deepseek-ai/dsh-session-checkpoint-policy @deepseek-ai/dsh-subprocess-local \
-  @deepseek-ai/dsh-bash-local @deepseek-ai/dsh-fs-local
-# Drop the default cordis.yml next to package.json (see below), then:
-export DSH_CORDIS_CONFIG="$PWD/cordis.yml"
-```
-
-For step 3, use the upstream default config —
-[`python/sdk-runtime/src/deepseek_harness_runtime/runtime/cordis.yml`](https://github.com/deepseek-ai/deepseek-harness/blob/master/python/sdk-runtime/src/deepseek_harness_runtime/runtime/cordis.yml)
-in the DSH repository — or compose your own (keep the
-`@deepseek-ai/dsh-sdk-jsonrpc-server` entry; without it the runtime serves
-nothing).
-
-> **npm route caveat:** the npm bin has no built-in plugin tree — plugin load
-> failures are fatal, and the SDK's bundled default config (extracted to a
-> temp directory, no `node_modules` beside it) cannot satisfy plugin
-> resolution. That is why this route sets `DSH_CORDIS_CONFIG` explicitly.
-
-### Route B — prebuilt single-file executable (wheel)
-
-Upstream packs the same runtime as a self-contained Node.js single-file
+Upstream packs the runtime as a self-contained Node.js single-file
 executable (no Node.js needed at runtime; plugin tree embedded) and
 distributes it through the Python SDK's `deepseek-harness-runtime-bin`
 platform wheel (linux-x64, linux-arm64, macos-arm64):
@@ -162,13 +114,70 @@ both) — if you copy the executable elsewhere, copy the helper too.
 This route works out of the box with the SDK-injected bundled default
 `cordis.yml` (see below): no `DSH_CORDIS_CONFIG` needed.
 
+### Route B — npm (no-build)
+
+The runtime bin is published as
+[`@deepseek-ai/dsh-sdk-jsonrpc-demo`](https://www.npmjs.com/package/@deepseek-ai/dsh-sdk-jsonrpc-demo)
+(bin: `dsh-jsonrpc-agent`). Requires Node.js ≥ 22.19. Install from the
+**`next` dist-tag**: the `latest` tags of these packages currently point at an
+older, mixed version matrix, while `next` resolves the whole set to one
+coherent release line (the line the interactive `dsh` CLI ships on). Run it
+either way:
+
+- **`npx` (no install)** — `npx` itself is the program, so use
+  `Config::launch_args_override`:
+
+  ```rust
+  Config {
+      launch_args_override: Some(vec![
+          "npx".into(),
+          "--yes".into(),
+          "@deepseek-ai/dsh-sdk-jsonrpc-demo@next".into(),
+      ]),
+      ..Config::default()
+  }
+  ```
+
+- **`npm install -g`** — the bin lands on `PATH`:
+
+  ```sh
+  npm install -g @deepseek-ai/dsh-sdk-jsonrpc-demo@next
+  export DSH_RUNTIME_BIN=dsh-jsonrpc-agent
+  ```
+
+Either way, the npm bin resolves the plugins named in `cordis.yml` from the
+**config project** — the directory the config file lives in — so this route
+also needs a small config project with the plugin set installed:
+
+```sh
+mkdir dsh-runtime && cd dsh-runtime
+npm init -y >/dev/null
+npm install @deepseek-ai/dsh-sdk-jsonrpc-server@next @deepseek-ai/dsh-agent-spine-demo@next \
+  @deepseek-ai/dsh-llm-deepseek@next @deepseek-ai/dsh-session-persistence-jsonl@next \
+  @deepseek-ai/dsh-session-checkpoint-policy@next @deepseek-ai/dsh-subprocess-local@next \
+  @deepseek-ai/dsh-bash-local@next @deepseek-ai/dsh-fs-local@next
+# Drop the default cordis.yml next to package.json (see below), then:
+export DSH_CORDIS_CONFIG="$PWD/cordis.yml"
+```
+
+For step 3, use the upstream default config —
+[`python/sdk-runtime/src/deepseek_harness_runtime/runtime/cordis.yml`](https://github.com/deepseek-ai/deepseek-harness/blob/master/python/sdk-runtime/src/deepseek_harness_runtime/runtime/cordis.yml)
+in the DSH repository — or compose your own (keep the
+`@deepseek-ai/dsh-sdk-jsonrpc-server` entry; without it the runtime serves
+nothing).
+
+> **npm route caveat:** the npm bin has no built-in plugin tree — plugin load
+> failures are fatal, and the SDK's bundled default config (extracted to a
+> temp directory, no `node_modules` beside it) cannot satisfy plugin
+> resolution. That is why this route sets `DSH_CORDIS_CONFIG` explicitly.
+
 ### How the SDK resolves the runtime (reference)
 
 The binary is resolved with Python `HarnessClient` parity, plus the
 Rust-only `DSH_RUNTIME_BIN` route:
 
 1. `Config::launch_args_override` (non-empty) — the whole argv, verbatim
-   (the npx variant of Route A uses this);
+   (the npx variant of Route B uses this);
 2. `Config::runtime_bin`;
 3. `DSH_RUNTIME_BIN` from the parent environment;
 4. otherwise `Error::RuntimeNotFound`, whose message names the acquisition
@@ -184,9 +193,9 @@ empty program.
 system temp directory on first use and byte-verified on every use — the
 runtime refuses to boot without an explicit config, so this injection is
 required, and an extraction/verification failure propagates as `Error::Io`
-(never a silent config-less launch). Note the [npm route caveat](#route-a--npm-default):
+(never a silent config-less launch). Note the [npm route caveat](#route-b--npm-no-build):
 the bundled default only resolves plugins when the runtime carries its own
-plugin tree (Route B's executable); with the npm bin, always provide
+plugin tree (Route A's executable); with the npm bin, always provide
 `DSH_CORDIS_CONFIG` yourself.
 
 > **Deliberate divergence from the Python SDK** (documented; do not "fix"):
@@ -343,8 +352,8 @@ entries — Python `dict.update` semantics):
 ## Platform support & MSRV
 
 The SDK itself is pure Rust and platform-light; the consumed runtime decides
-the platform matrix. Route A (npm) runs wherever Node.js ≥ 22.19 does;
-Route B (wheel executable) ships linux-x64, linux-arm64, macos-arm64. **No
+the platform matrix. Route A (prebuilt executable) ships linux-x64, linux-arm64,
+macos-arm64; Route B (npm) runs wherever Node.js ≥ 22.19 does. **No
 Windows**: upstream has no Windows runtime builds.
 
 MSRV: current stable Rust (no minimum is pinned in `Cargo.toml`; the crate
