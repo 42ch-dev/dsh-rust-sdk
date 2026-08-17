@@ -180,8 +180,10 @@ mod tests {
 
     #[test]
     fn read_write_round_trip_preserves_formatting() {
-        // Fixture: the real repo manifest (version never moves during
-        // development per the release plan's Global Constraints).
+        // Fixture: the real repo manifest. The version is read dynamically
+        // so the test stays green no matter which release version the repo
+        // currently carries (it used to hardcode a constant, which broke as
+        // soon as the live version moved past it).
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let original = fs::read_to_string(root.join("Cargo.toml")).unwrap();
         let dir = tempdir().unwrap();
@@ -189,11 +191,24 @@ mod tests {
         fs::write(&manifest, &original).unwrap();
 
         let version = read_package_version(&manifest).unwrap();
-        assert_eq!(version.to_string(), "0.1.0-alpha.1");
 
+        // Writing the same version back leaves the file byte-identical.
         write_package_version(&manifest, &version).unwrap();
-
         let rewritten = fs::read_to_string(&manifest).unwrap();
         assert_eq!(rewritten, original, "round-trip must be byte-identical");
+
+        // Writing a *different*, known version changes only the version
+        // value: formatting must be preserved byte-for-byte apart from it,
+        // and the new value must read back (no coupling to the live
+        // version, which contains the release-verify regression).
+        let known = v("9.9.9");
+        write_package_version(&manifest, &known).unwrap();
+        let rewritten = fs::read_to_string(&manifest).unwrap();
+        assert_eq!(
+            rewritten,
+            original.replace(&version.to_string(), "9.9.9"),
+            "only the version value may change; formatting must be preserved"
+        );
+        assert_eq!(read_package_version(&manifest).unwrap(), known);
     }
 }
