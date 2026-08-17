@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-17
+
+### Changed
+- README install instructions no longer pin a point version: the documented command is a bare `cargo add deepseek-harness-sdk` with a `"*"` dependency line, leaving version selection to the user; the pre-release note keeps only channel-level guidance (explicit `@0.1.0-alpha` style request while on a pre-release line).
+
 ## [0.1.0-alpha.2] - 2026-08-17
 
 ### Added
