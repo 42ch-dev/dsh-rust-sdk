@@ -23,7 +23,7 @@ Rust SDK for DSH (DeepSeek Harness). Builds with Cargo (`cargo build` / `cargo t
 - `cargo test` — runs the suite (default before merge).
 - `cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` — style/lint gates.
 - Toolchain: `rust-toolchain.toml` pins `channel = "stable"`, `profile = "minimal"`; MSRV statement is "current stable".
-- CI (`.github/workflows/ci.yml`): same gates on `pull_request` and `push` to `main` / `iteration/**`; pinned action SHAs, per-ref concurrency, rust-cache.
+- CI (`.github/workflows/ci.yml`): same gates on `pull_request` and `push` to `main` / `iteration/**`; pinned action SHAs, per-ref concurrency, rust-cache; `changelog fragment` job requires PRs to touch `.changes/unreleased/` (see Changelog fragments).
 
 ## Git & Branch Policy
 
@@ -31,6 +31,12 @@ Rust SDK for DSH (DeepSeek Harness). Builds with Cargo (`cargo build` / `cargo t
 - Branch/worktree alignment and QC checkout rules: `mstar-branch-worktree` skill; status/residual SSOT: `status.json` (see `.mstar/AGENTS.md`).
 - Never commit `status.json`, `plans/`, `iterations/`, `sdd/`, `notes.json` (process-local).
 - `.mstar/roadmap.md` is **local-only**: untracked, gitignored; do not `git add` it. Cross-clone durable roadmap content belongs in `.mstar/knowledge/` or this file.
+
+## Changelog fragments (release discipline)
+
+- Every PR that changes user-visible behavior ships a changelog fragment in the same PR: `.changes/unreleased/<slug>.md` with optional frontmatter `category:` (`Added` / `Changed` / `Fixed` / `Deprecated` / `Removed` / `Security`) and at least one English `- ` bullet. Format SSOT: `docs/release.md`.
+- CI enforces this on PRs: the `changelog fragment` job fails when the PR diff does not touch `.changes/unreleased/`. Release-prep output is exempt — recognized by **either** a `release/*` head branch **or** a PR diff that contains Release-prep artifacts (changes confined to `.changes/` + `CHANGELOG.md` + `Cargo.toml` + `Cargo.lock`).
+- Never hand-edit `CHANGELOG.md`; it is assembled from fragments by `cargo xtask release-prepare` during Release prep.
 
 ## Bilingual README rule
 

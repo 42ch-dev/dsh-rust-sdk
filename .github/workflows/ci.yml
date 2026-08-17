@@ -50,3 +50,48 @@ jobs:
 
       - name: Test
         run: cargo test
+
+  changes:
+    name: changelog fragment
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        # actions/checkout@v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Fetch base branch
+        run: git fetch --no-tags origin "${{ github.event.pull_request.base.ref }}"
+
+      # A PR must contribute its own fragment changes. Exempt Release-prep
+      # output entirely — recognized by EITHER a release/* head branch OR a
+      # diff confined to the four paths Release prep writes (.changes/,
+      # CHANGELOG.md, Cargo.toml, Cargo.lock): that workflow archives
+      # fragments by design, so it can never add an unreleased one.
+      - name: Require a .changes/unreleased fragment in the PR diff
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$HEAD_REF" == release/* ]]; then
+            echo "Release-prep branch detected; exempt from the fragment gate."
+            exit 0
+          fi
+          BASE="origin/${BASE_REF}"
+          CHANGED="$(git diff --name-only "${BASE}...HEAD" || true)"
+          NON_PREP="$(printf '%s\n' "$CHANGED" | grep -v -E -e '^\.changes/' -e '^CHANGELOG\.md$' -e '^Cargo\.toml$' -e '^Cargo\.lock$' || true)"
+          if [ -z "$NON_PREP" ]; then
+            echo "Diff is confined to Release-prep artifact paths; exempt from the fragment gate."
+            exit 0
+          fi
+          FRAGMENTS="$(git diff --name-only "${BASE}...HEAD" -- '.changes/unreleased/' | grep -v -E -e '/\.gitkeep$' -e '^\.changes/unreleased/README\.md$' || true)"
+          if [ -z "$FRAGMENTS" ]; then
+            echo "::error::This PR does not add or modify any .changes/unreleased/ fragment. Every user-visible change ships a fragment in the same PR (format: docs/release.md). Release-prep output is exempt."
+            exit 1
+          fi
+          echo "Fragments in this PR:"
+          printf '%s\n' "$FRAGMENTS"
