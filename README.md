@@ -350,6 +350,8 @@ Windows**: upstream has no Windows runtime builds.
 MSRV: current stable Rust (no minimum is pinned in `Cargo.toml`; the crate
 tracks the stable toolchain).
 
+## Known limitations
+
 - **Pre-release software** — the crate ships pre-release versions while the
   runtime protocol settles; the API may change before `0.1.0`. The
   real-runtime smoke test is environment-gated (see [Testing](#testing)); the
