@@ -27,19 +27,21 @@ API 的类型与错误，均以 **Python SDK 表面为对齐基线**。TypeScrip
 ## 安装
 
 ```sh
-cargo add deepseek-harness-sdk@0.1.0-alpha.1
+cargo add deepseek-harness-sdk
 ```
 
 或写入 `Cargo.toml`：
 
 ```toml
 [dependencies]
-deepseek-harness-sdk = "0.1.0-alpha.1"
+deepseek-harness-sdk = "*"
 ```
 
-> **预发布版本提示：** `0.1.0-alpha.1` 是预发布版本——必须显式指定版本
-> （`@0.1.0-alpha.1` 或完整版本号），裸的 `cargo add deepseek-harness-sdk`
-> 不会解析到预发布版本。`0.1.0` 之前 API 仍可能变化。
+版本由你选择（`cargo search deepseek-harness-sdk` 或
+[crates.io 页面](https://crates.io/crates/deepseek-harness-sdk) 可查最新版）。
+crate 处于预发布线时，裸的 `cargo add deepseek-harness-sdk` 可能不会解析到
+最新的预发布版本——需要时请显式指定（例如
+`cargo add deepseek-harness-sdk@0.1.0-alpha`）。`0.1.0` 之前 API 仍可能变化。
 
 首次运行前的两个前置条件：一个 DSH 运行时（见
 [运行时获取](#运行时获取)）与模型凭据（环境变量 `DEEPSEEK_API_KEY`，或
@@ -319,11 +321,9 @@ SDK 本体是纯 Rust、平台负担很小；平台矩阵由所消费的运行�
 MSRV：当前 stable Rust（`Cargo.toml` 未固定最低版本；本 crate 跟随稳定版
 工具链）。
 
-## 已知限制
-
-- **预发布软件** —— `0.1.0-alpha.1`；`0.1.0` 之前 API 仍可能变化。真实
-  运行时冒烟测试按环境门控（见[测试](#测试)）；协议正确性由 fake-runtime
-  套件承担。
+- **预发布软件** —— 在运行时协议稳定之前，crate 以预发布版本发布；
+  `0.1.0` 之前 API 仍可能变化。真实运行时冒烟测试按环境门控（见
+  [测试](#测试)）；协议正确性由 fake-runtime 套件承担。
 - **不支持中途取消** —— 线上协议没有 session-close / cancel RPC。
   `Session::run` 会一直等到根会话上报 `idle`；中途关闭 harness 会放弃
   进行中的回合。`Config::request_timeout` 只会放弃本地等待——服务端工作

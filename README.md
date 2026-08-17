@@ -27,20 +27,22 @@ bring-your-own: this crate never downloads, bundles, or ships one.
 ## Installation
 
 ```sh
-cargo add deepseek-harness-sdk@0.1.0-alpha.1
+cargo add deepseek-harness-sdk
 ```
 
 or in `Cargo.toml`:
 
 ```toml
 [dependencies]
-deepseek-harness-sdk = "0.1.0-alpha.1"
+deepseek-harness-sdk = "*"
 ```
 
-> **Pre-release note:** `0.1.0-alpha.1` is a pre-release version — request it
-> explicitly (with `@0.1.0-alpha.1` or the full version string). A bare
-> `cargo add deepseek-harness-sdk` will not resolve to a pre-release. The API
-> may still change before `0.1.0`.
+Pick the version that suits you (`cargo search deepseek-harness-sdk` or the
+[crates.io page](https://crates.io/crates/deepseek-harness-sdk) shows the
+latest). While the crate is on a pre-release line, a bare
+`cargo add deepseek-harness-sdk` may not resolve to the newest pre-release —
+request it explicitly (e.g. `cargo add deepseek-harness-sdk@0.1.0-alpha`) when
+you want it. The API may still change before `0.1.0`.
 
 Two prerequisites before the first run: a DSH runtime (see
 [Runtime acquisition](#runtime-acquisition)) and model credentials
@@ -348,11 +350,10 @@ Windows**: upstream has no Windows runtime builds.
 MSRV: current stable Rust (no minimum is pinned in `Cargo.toml`; the crate
 tracks the stable toolchain).
 
-## Known limitations
-
-- **Pre-release software** — `0.1.0-alpha.1`; the API may change before
-  `0.1.0`. The real-runtime smoke test is environment-gated (see
-  [Testing](#testing)); the fake-runtime suites carry protocol correctness.
+- **Pre-release software** — the crate ships pre-release versions while the
+  runtime protocol settles; the API may change before `0.1.0`. The
+  real-runtime smoke test is environment-gated (see [Testing](#testing)); the
+  fake-runtime suites carry protocol correctness.
 - **No mid-turn cancel** — there is no session-close / cancel RPC on the
   wire. `Session::run` waits until the root session reports `idle`; closing
   the harness mid-turn abandons the in-flight turn. A `Config::request_timeout`
