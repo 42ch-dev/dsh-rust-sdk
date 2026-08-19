@@ -103,7 +103,7 @@ export DSH_RUNTIME_BIN="$(python -c 'import deepseek_harness_runtime as r; print
 那条 `python -c` 只是**定位**已安装的可执行文件并打印其路径——**SDK
 运行时不跑任何 Python**。macOS 上该可执行文件需要同目录下的伴生
 `-spawn-helper` 文件（wheel 会一并安装）——如果你把可执行文件复制到
-别处，请把 helper 一起复制。
+别处，请把 helper 一起复制。wheel 还会在可执行文件旁安装配套的 ripgrep `-rg` 伴随文件——捆绑的默认配置不会用到它，但挂载 fs-search 工具的配置需要它与可执行文件同目录（移动可执行文件时请一并复制）。
 
 本途径配合 SDK 注入的捆绑默认 `cordis.yml`（见下文）开箱即用：不需要
 `DSH_CORDIS_CONFIG`。

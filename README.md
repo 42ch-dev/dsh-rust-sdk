@@ -109,7 +109,7 @@ export DSH_RUNTIME_BIN="$(python -c 'import deepseek_harness_runtime as r; print
 The `python -c` invocation only *locates* the installed executable and prints
 its path — **no Python runs at SDK runtime**. On macOS the executable needs
 its sibling `-spawn-helper` file in the same directory (the wheel installs
-both) — if you copy the executable elsewhere, copy the helper too.
+both) — if you copy the executable elsewhere, copy the helper too. The wheel also ships a matching ripgrep `-rg` sidecar beside the executable — the bundled default config does not use it, but a config that mounts the fs-search tool needs it there too (copy it along when relocating the executable).
 
 This route works out of the box with the SDK-injected bundled default
 `cordis.yml` (see below): no `DSH_CORDIS_CONFIG` needed.
