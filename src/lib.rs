@@ -14,18 +14,18 @@
 //! # Compatibility
 //!
 //! The **Python** SDK surface is the alignment baseline for types and errors
-//! that leak into the public API. The TypeScript SDK's `RunResult` lacks
-//! `finish_reason` and `session_root`; Rust intentionally follows Python, not
-//! TypeScript:
+//! that leak into the public API. [`RunResult`] mirrors Python's five fields
+//! exactly (`session_id`, `final_response`, `finish_reason`, `events`,
+//! `notifications`); the TypeScript SDK's `RunResult` lacks `finish_reason`.
+//! Rust intentionally follows Python, not TypeScript:
 //!
 //! | Field | Python | TypeScript | Rust (this crate) |
 //! |---|---|---|---|
 //! | `session_id` / `sessionId` | yes | yes | [`RunResult::session_id`] |
 //! | `final_response` / `finalResponse` | yes | yes | [`RunResult::final_response`] |
-//! | `finish_reason` | yes (Python extension) | no | [`RunResult::finish_reason`] |
+//! | `finish_reason` | yes | no | [`RunResult::finish_reason`] |
 //! | `events` (root session only) | yes | yes | [`RunResult::events`] |
 //! | `notifications` (root + descendants) | yes | yes | [`RunResult::notifications`] |
-//! | `session_root` | yes (Python extension) | no | [`RunResult::session_root`] |
 //!
 //! (The table is mirrored in the crate README, `## RunResult alignment`;
 //! keep the two copies in sync.)

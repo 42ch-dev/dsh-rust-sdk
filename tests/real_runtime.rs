@@ -99,9 +99,6 @@ async fn real_runtime_smoke() {
         "expected a non-empty final_response"
     );
     assert!(!result.session_id.is_empty(), "session id present");
-    // `Config::session_root` is removed (spec §5); `RunResult::session_root`
-    // is always `None` until plan 05 task 3 drops the field (spec §6.2).
-    assert_eq!(result.session_root, None);
 
     let response = &result.final_response;
     let preview: String = response.chars().take(200).collect();

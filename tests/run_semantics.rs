@@ -159,9 +159,6 @@ async fn full_happy_path_yields_python_run_result() {
             .and_then(Value::as_str),
         Some("idle")
     );
-    // `Config::session_root` is removed (spec §5); `RunResult::session_root`
-    // is always `None` until plan 05 task 3 drops the field (spec §6.2).
-    assert_eq!(result.session_root, None);
 }
 
 #[tokio::test]

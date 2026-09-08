@@ -10,9 +10,10 @@
 //! [`RunResult::final_response`] and [`RunResult::finish_reason`] exactly as
 //! the Python SDK does.
 //!
-//! [`RunResult`] follows the **Python** SDK field set, including
-//! `finish_reason` and `session_root`; the TypeScript SDK's `RunResult`
-//! lacks both fields, and Rust intentionally does not claim TypeScript
+//! [`RunResult`] mirrors the **Python** SDK's five fields exactly
+//! (`session_id`, `final_response`, `finish_reason`, `events`,
+//! `notifications`); the TypeScript SDK's `RunResult` lacks
+//! `finish_reason`, and Rust intentionally does not claim TypeScript
 //! surface parity.
 //!
 //! The runtime binary is bring-your-own (Plan A): [`DeepSeekHarness::start`]
@@ -23,7 +24,6 @@
 //! <https://github.com/deepseek-ai/deepseek-harness>.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use serde_json::Value;
 use uuid::Uuid;
@@ -325,9 +325,6 @@ impl Session<'_> {
             finish_reason,
             events,
             notifications,
-            // `Config::session_root` is removed (spec §5); the field itself
-            // is dropped by plan 05 task 3 (spec §6.2).
-            session_root: None,
         })
     }
 }
@@ -361,8 +358,9 @@ pub enum Input {
 }
 
 /// The result of one [`Session::run`], field-for-field the **Python** SDK's
-/// `RunResult` (the TypeScript SDK's `RunResult` lacks `finish_reason` and
-/// `session_root`; Rust intentionally follows Python).
+/// `RunResult`: exactly the five Python fields, spec §6.2 — no
+/// `session_root`. (The TypeScript SDK's `RunResult` lacks `finish_reason`;
+/// Rust intentionally follows Python.)
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunResult {
     /// The SDK session id this turn ran on.
@@ -381,9 +379,6 @@ pub struct RunResult {
     /// Every tree notification (root + discovered descendants, incl.
     /// `session.status` / `subagent.*`), in transport order.
     pub notifications: Vec<Notification>,
-    /// The configured session root (`DSH_SESSION_ROOT`), Python extension
-    /// field.
-    pub session_root: Option<PathBuf>,
 }
 
 /// Extract the finish reason from a collected activity interval, Python
@@ -469,6 +464,34 @@ mod tests {
 
     fn unrelated_event() -> Value {
         json!({"type": "assistant/message", "data": {"content": []}})
+    }
+
+    /// Compile-time spec §6.2 assertion: `RunResult` has exactly the five
+    /// Python fields and no `session_root` accessor. Both the construction
+    /// and the exhaustive destructure name every field — no `..`, no `_` —
+    /// so a field added (including a `session_root` resurrection), renamed,
+    /// or removed fails the build.
+    #[test]
+    fn run_result_has_exactly_the_five_python_fields() {
+        let result = RunResult {
+            session_id: "session-1".to_string(),
+            final_response: "hello".to_string(),
+            finish_reason: Some("completed".to_string()),
+            events: vec![],
+            notifications: vec![],
+        };
+        let RunResult {
+            session_id,
+            final_response,
+            finish_reason,
+            events,
+            notifications,
+        } = result;
+        assert_eq!(session_id, "session-1");
+        assert_eq!(final_response, "hello");
+        assert_eq!(finish_reason.as_deref(), Some("completed"));
+        assert!(events.is_empty());
+        assert!(notifications.is_empty());
     }
 
     #[test]
