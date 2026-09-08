@@ -7,8 +7,9 @@
 
 mod common;
 
-use deepseek_harness_sdk::{DeepSeekHarness, Error, Input, RunResult};
+use deepseek_harness_sdk::{DeepSeekHarness, Error, Input, Notification, RunResult};
 use serde_json::{json, Value};
+use std::sync::{Arc, Mutex};
 
 use common::fake_runtime::{
     emit, exit, expect, expect_params, harness_config, respond, respond_error, run_prefix,
@@ -33,7 +34,7 @@ async fn run_once(script: &[Directive], input: &str) -> Result<RunResult, Error>
     let mut h = harness(script).await;
     let result = h
         .start_session(Some(ROOT_SESSION.to_string()))
-        .run(Input::Text(input.to_string()))
+        .run(Input::Text(input.to_string()), None)
         .await;
     h.close().await.expect("clean close");
     result
@@ -472,7 +473,7 @@ async fn prompt_error_propagates_and_client_stays_usable() {
     let session = h.start_session(Some(ROOT_SESSION.to_string()));
 
     let err = session
-        .run(Input::Text("hello".to_string()))
+        .run(Input::Text("hello".to_string()), None)
         .await
         .expect_err("a JSON-RPC error on session/prompt must propagate");
     match err {
@@ -491,7 +492,7 @@ async fn prompt_error_propagates_and_client_stays_usable() {
     // The harness (and the session) stay usable: a second turn runs to
     // completion against the same peer.
     let result = session
-        .run(Input::Text("again".to_string()))
+        .run(Input::Text("again".to_string()), None)
         .await
         .expect("the client must remain usable after a prompt error");
     assert_eq!(result.final_response, "second-chance");
@@ -639,4 +640,104 @@ async fn broadcast_overflow_before_receipt_fails_fast_with_lag_error() {
         }
         other => panic!("expected SdkProtocol, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn on_notification_callback_observes_every_tree_notification_in_order() {
+    // A script whose tree delivers a pre-receipt notification (excluded
+    // from RunResult but still delivered to the subscription), the receipt,
+    // a subagent edge, a child event, a root assistant/message, turn/end,
+    // and the root idle — the full wire sequence the subscription hands the
+    // run.
+    let mut script = run_prefix("msg-cb");
+    script.extend([
+        emit(
+            "session.event",
+            root_event(json!({"type": "test", "text": "before-receipt"})),
+        ),
+        emit("session.event", root_event(receipt_event("msg-cb"))),
+        emit(
+            "subagent.started",
+            json!({"parentSessionId": ROOT_SESSION, "childSessionId": CHILD_SESSION}),
+        ),
+        emit(
+            "session.event",
+            session_event(
+                CHILD_SESSION,
+                assistant_event(json!([{"type": "text", "text": "child-output"}])),
+            ),
+        ),
+        emit(
+            "session.event",
+            root_event(assistant_event(
+                json!([{"type": "text", "text": "root-output"}]),
+            )),
+        ),
+        emit("session.event", root_event(turn_end("completed"))),
+        emit("session.status", idle(ROOT_SESSION)),
+        exit(0),
+    ]);
+
+    // Baseline: the no-callback path's RunResult for the same script.
+    let baseline = run_once(&script, "hello").await.expect("run succeeds");
+
+    // Callback path: record every notification the callback observes.
+    let observed: Arc<Mutex<Vec<Notification>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut h = harness(&script).await;
+    let session = h.start_session(Some(ROOT_SESSION.to_string()));
+    let observed_for_callback = observed.clone();
+    let result = session
+        .run(
+            Input::Text("hello".to_string()),
+            Some(&move |notification: &Notification| {
+                observed_for_callback
+                    .lock()
+                    .expect("callback lock")
+                    .push(notification.clone());
+            }),
+        )
+        .await
+        .expect("run succeeds");
+    h.close().await.expect("clean close");
+
+    // The callback observed every notification the subscription delivered,
+    // in wire order — including the pre-receipt one RunResult excludes.
+    let observed = observed.lock().expect("observed lock");
+    let methods: Vec<&str> = observed.iter().map(|n| n.method.as_str()).collect();
+    assert_eq!(
+        methods,
+        [
+            "session.event", // before-receipt
+            "session.event", // receipt
+            "subagent.started",
+            "session.event",  // child
+            "session.event",  // root assistant/message
+            "session.event",  // turn/end
+            "session.status", // root idle
+        ]
+    );
+    assert_eq!(event_type(&observed[0].payload), Some("test"));
+    assert_eq!(
+        event_type(&observed[1].payload),
+        Some("agent/inbox/spliced")
+    );
+    assert_eq!(
+        observed[2]
+            .payload
+            .get("childSessionId")
+            .and_then(Value::as_str),
+        Some(CHILD_SESSION)
+    );
+    assert_eq!(
+        observed[3].payload.get("sessionId").and_then(Value::as_str),
+        Some(CHILD_SESSION)
+    );
+    assert_eq!(
+        observed[6].payload.get("status").and_then(Value::as_str),
+        Some("idle")
+    );
+
+    // The callback observes; it does not change the result: the RunResult
+    // is identical to the no-callback path (spec §6.5 rule 3).
+    assert_eq!(result, baseline);
 }

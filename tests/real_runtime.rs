@@ -78,7 +78,7 @@ async fn real_runtime_smoke() {
         Duration::from_secs(600),
         harness
             .start_session(None)
-            .run(Input::Text("Reply with exactly: ok".into())),
+            .run(Input::Text("Reply with exactly: ok".into()), None),
     )
     .await
     .expect("real-runtime turn completes within the smoke timeout")

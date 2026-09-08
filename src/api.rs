@@ -225,7 +225,32 @@ impl Session<'_> {
     /// malformed notification; Rust surfaces the same condition as a typed
     /// error instead of silently dropping an event or misreading the idle
     /// termination.
-    pub async fn run(&self, input: Input) -> Result<RunResult, Error> {
+    ///
+    /// # Per-notification callback
+    ///
+    /// `on_notification` observes **every notification delivered to this
+    /// run's session-tree subscription, in wire order** — including
+    /// `session.event`, `session.status`, and `subagent.*` — and is invoked
+    /// as each notification arrives, not deferred until the run ends. It is
+    /// a layer over the existing subscription path, never a second
+    /// subscription: the run already owns one tree subscription, and the
+    /// callback neither filters nor consumes. Passing `None` behaves
+    /// exactly like the no-callback path, and the returned [`RunResult`] is
+    /// identical with or without a callback (spec §6.5; upstream
+    /// `packages/sdk/client/src/api.ts:150-156,186-200`,
+    /// `python/sdk/src/deepseek_harness/api.py:124-131,139-144`).
+    ///
+    /// The bound is `Fn(&Notification) + Send + Sync`, not `FnMut`: a
+    /// caller needing shared mutable state captures an `Arc<Mutex<..>>` by
+    /// interior mutability, and [`Session::run`] keeps taking `&self` — the
+    /// callback never requires giving up ownership of the session. A panic
+    /// in the callback is a caller bug and propagates; the crate does not
+    /// swallow it (spec §6.5).
+    pub async fn run(
+        &self,
+        input: Input,
+        on_notification: Option<&(dyn Fn(&Notification) + Send + Sync)>,
+    ) -> Result<RunResult, Error> {
         let content_blocks = match input {
             Input::Text(text) => vec![ContentBlock::Text { text }],
             Input::Blocks(blocks) => blocks,
@@ -245,10 +270,15 @@ impl Session<'_> {
 
         // Phase 1 — the durable inbox receipt of this exact message.
         // Notifications before it are dropped from both `events` and
-        // `notifications` (Python parity).
+        // `notifications` (Python parity), but the callback still observes
+        // them: it sees every notification the subscription delivers, in
+        // wire order (spec §6.5).
         let receipt = loop {
             let notification = subscription.recv().await?;
             ensure_no_lag(&mut subscription)?;
+            if let Some(callback) = on_notification {
+                callback(&notification);
+            }
             let is_receipt = match notification.session_event() {
                 Some(Ok(event)) => {
                     event.session_id == *root && is_inbox_receipt(&event.event, &message_id)
@@ -345,6 +375,9 @@ impl Session<'_> {
             }
             notification = subscription.recv().await?;
             ensure_no_lag(&mut subscription)?;
+            if let Some(callback) = on_notification {
+                callback(&notification);
+            }
         }
 
         let finish_reason = extract_finish_reason(&events)?;
