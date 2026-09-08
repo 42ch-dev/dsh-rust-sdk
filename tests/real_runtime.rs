@@ -25,10 +25,22 @@ use deepseek_harness_sdk::{Config, DeepSeekHarness, Input};
 
 mod common;
 
-/// The `dsh` version this file was validated against locally (probed
-/// `dsh --version` on 2026-09-09). Recorded in the skip/notice text so a
-/// reader knows which runtime the keyless tier was exercised against.
-const PROBED_DSH_VERSION: &str = "0.1.2-alpha.5";
+/// Best-effort probe of the resolved runtime's own version (`dsh --version`),
+/// so the notice reports the version the test actually ran against instead of
+/// a hard-coded literal. Returns `None` when the probe fails (non-zero exit,
+/// empty or non-UTF-8 output) — the notice then degrades to "version unknown"
+/// and the test itself is never blocked by the probe.
+fn probe_dsh_version(runtime_bin: &str) -> Option<String> {
+    let output = std::process::Command::new(runtime_bin)
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version = String::from_utf8(output.stdout).ok()?.trim().to_owned();
+    (!version.is_empty()).then_some(version)
+}
 
 /// Resolve the runtime binary: `DSH_RUNTIME_BIN` (non-empty) first, then
 /// `dsh` on `PATH`. Returns `None` when neither exists, so the caller can
@@ -79,7 +91,7 @@ async fn real_runtime_handshake() {
         eprintln!(
             "skipping real-runtime handshake: no dsh binary found; set DSH_RUNTIME_BIN \
              or put dsh on PATH (https://github.com/deepseek-ai/deepseek-harness) to run \
-             this test (validated locally against dsh {PROBED_DSH_VERSION})"
+             this test (validated locally against a real dsh runtime)"
         );
         return;
     };
@@ -96,8 +108,9 @@ async fn real_runtime_handshake() {
     harness.close().await.expect("clean close");
 
     println!(
-        "real-runtime handshake ok: dsh={runtime_bin} dsh_home={} (dsh {PROBED_DSH_VERSION})",
-        dsh_home.display()
+        "real-runtime handshake ok: dsh={runtime_bin} dsh_home={} (dsh {})",
+        dsh_home.display(),
+        probe_dsh_version(&runtime_bin).unwrap_or_else(|| "version unknown".into())
     );
 }
 
@@ -115,7 +128,7 @@ async fn real_runtime_smoke() {
         eprintln!(
             "skipping real-runtime smoke: no dsh binary found; set DSH_RUNTIME_BIN \
              or put dsh on PATH (https://github.com/deepseek-ai/deepseek-harness) to run \
-             this test (validated locally against dsh {PROBED_DSH_VERSION})"
+             this test (validated locally against a real dsh runtime)"
         );
         return;
     };
