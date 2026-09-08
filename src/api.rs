@@ -12,9 +12,9 @@
 //!
 //! [`RunResult`] mirrors the **Python** SDK's five fields exactly
 //! (`session_id`, `final_response`, `finish_reason`, `events`,
-//! `notifications`); the TypeScript SDK's `RunResult` lacks
-//! `finish_reason`, and Rust intentionally does not claim TypeScript
-//! surface parity.
+//! `notifications`; upstream `python/sdk/src/deepseek_harness/api.py:40-46`);
+//! the TypeScript SDK's `RunResult` lacks `finish_reason`, and Rust
+//! intentionally does not claim TypeScript surface parity.
 //!
 //! The runtime binary is bring-your-own (Plan A): [`DeepSeekHarness::start`]
 //! resolves it from `Config::dsh_bin` or the `DSH_RUNTIME_BIN` environment
@@ -358,9 +358,10 @@ pub enum Input {
 }
 
 /// The result of one [`Session::run`], field-for-field the **Python** SDK's
-/// `RunResult`: exactly the five Python fields, spec §6.2 — no
-/// `session_root`. (The TypeScript SDK's `RunResult` lacks `finish_reason`;
-/// Rust intentionally follows Python.)
+/// `RunResult` (upstream `python/sdk/src/deepseek_harness/api.py:40-46`):
+/// exactly the five Python fields, spec §6.2 — no `session_root`. (The
+/// TypeScript SDK's `RunResult` lacks `finish_reason`; Rust intentionally
+/// follows Python.)
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunResult {
     /// The SDK session id this turn ran on.
@@ -369,10 +370,11 @@ pub struct RunResult {
     /// text blocks (`text: null` or a non-string `text` contributes `""`);
     /// `""` when the activity interval contains no `assistant/message` — or
     /// the last one has no text blocks. Never falls back to an earlier
-    /// event.
+    /// event (Python algorithm, `python/sdk/src/deepseek_harness/api.py:211-228`).
     pub final_response: String,
     /// The last root `turn/end` event's `data.reason.kind` inside the
-    /// activity interval (`None` when the window has no `turn/end`).
+    /// activity interval (`None` when the window has no `turn/end`; Python
+    /// algorithm, `python/sdk/src/deepseek_harness/api.py:231-248`).
     pub finish_reason: Option<String>,
     /// Root-session `session.event` payloads only, in transport order.
     pub events: Vec<Value>,
@@ -467,10 +469,11 @@ mod tests {
     }
 
     /// Compile-time spec §6.2 assertion: `RunResult` has exactly the five
-    /// Python fields and no `session_root` accessor. Both the construction
-    /// and the exhaustive destructure name every field — no `..`, no `_` —
-    /// so a field added (including a `session_root` resurrection), renamed,
-    /// or removed fails the build.
+    /// Python fields. Both the construction and the exhaustive destructure
+    /// name every field — no `..`, no `_` — so a field added (including a
+    /// `session_root` resurrection), renamed, or removed fails the build.
+    /// This guards the field set only; it does not prove the absence of an
+    /// accessor method.
     #[test]
     fn run_result_has_exactly_the_five_python_fields() {
         let result = RunResult {

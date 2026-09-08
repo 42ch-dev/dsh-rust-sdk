@@ -16,8 +16,9 @@
 //! The **Python** SDK surface is the alignment baseline for types and errors
 //! that leak into the public API. [`RunResult`] mirrors Python's five fields
 //! exactly (`session_id`, `final_response`, `finish_reason`, `events`,
-//! `notifications`); the TypeScript SDK's `RunResult` lacks `finish_reason`.
-//! Rust intentionally follows Python, not TypeScript:
+//! `notifications`; upstream `python/sdk/src/deepseek_harness/api.py:40-46`);
+//! the TypeScript SDK's `RunResult` lacks `finish_reason`. Rust
+//! intentionally follows Python, not TypeScript:
 //!
 //! | Field | Python | TypeScript | Rust (this crate) |
 //! |---|---|---|---|
