@@ -729,7 +729,10 @@ mod tests {
             &block,
             r#"{"type":"image","attachment":{"attachmentId":"att-1","mediaType":"image/png","bytes":123,"width":10,"height":20,"name":"pic.png","originalDimensions":{"width":4000,"height":3000}}}"#,
         );
-        // Absent originalDimensions stays absent on the wire.
+        // Absent originalDimensions stays absent on the wire. The block
+        // must still deserialize to the typed Image variant (not fall
+        // through to Unknown, which would also omit the key) with the
+        // field None.
         let plain: ContentBlock = serde_json::from_value(json!({
             "type":"image","attachment":{
                 "attachmentId":"att-1","mediaType":"image/png","bytes":123,
@@ -737,6 +740,15 @@ mod tests {
             }
         }))
         .unwrap();
+        match &plain {
+            ContentBlock::Image { attachment } => {
+                assert_eq!(
+                    attachment.original_dimensions, None,
+                    "absent originalDimensions must deserialize to None"
+                );
+            }
+            other => panic!("expected Image, got {other:?}"),
+        }
         let out = serde_json::to_value(&plain).unwrap();
         assert!(!out["attachment"]
             .as_object()
