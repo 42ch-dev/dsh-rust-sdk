@@ -14,18 +14,20 @@ use std::time::Duration;
 
 use deepseek_harness_sdk::{Config, DeepSeekHarness, Input};
 
-/// One smoke turn: start a harness with a temp `session_root` and default
+mod common;
+
+/// One smoke turn: start a harness with a temp `dsh_home` and default
 /// config, run `Session::run`, and assert **structural** facts only (LLM
 /// output is nondeterministic): a success-class `finish_reason`
-/// (`completed`/`max-tokens`), a non-empty `final_response`, the session ids
-/// present, and the configured `session_root` surfaced.
+/// (`completed`/`max-tokens`), a non-empty `final_response`, and the
+/// session id present.
 #[tokio::test]
 async fn real_runtime_smoke() {
     // Runtime gating — read at runtime, not at compile time.
-    let runtime_bin = std::env::var("DSH_RUNTIME_BIN")
+    let runtime_path = std::env::var("DSH_RUNTIME_BIN")
         .ok()
         .filter(|bin| !bin.trim().is_empty());
-    let Some(runtime_bin) = runtime_bin else {
+    let Some(runtime_path) = runtime_path else {
         eprintln!(
             "skipping real-runtime smoke: DSH_RUNTIME_BIN is unset or empty; \
              set it to a DeepSeek Harness runtime binary \
@@ -45,9 +47,11 @@ async fn real_runtime_smoke() {
         return;
     };
 
-    // A unique temp session root so repeated runs never reuse stale session
-    // state (process id + monotonic nanos; no extra dependency needed).
-    let session_root = std::env::temp_dir().join(format!(
+    // A unique temp harness home so repeated runs never reuse stale session
+    // state (process id + monotonic nanos; no extra dependency needed),
+    // under the per-run test temp root so the suite's artifacts stay
+    // consolidated and bounded (F6).
+    let dsh_home = common::fake_runtime::test_temp_root().join(format!(
         "dsh-sdk-real-runtime-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
@@ -55,12 +59,12 @@ async fn real_runtime_smoke() {
             .expect("system clock before unix epoch")
             .as_nanos()
     ));
-    std::fs::create_dir_all(&session_root).expect("create temp session root");
+    std::fs::create_dir_all(&dsh_home).expect("create temp harness home");
 
     let mut harness = DeepSeekHarness::start(Config {
-        runtime_bin: Some(runtime_bin),
+        dsh_bin: Some(runtime_path),
         api_key: Some(api_key),
-        session_root: Some(session_root.to_string_lossy().into_owned()),
+        dsh_home: Some(dsh_home.clone()),
         // Bound the wire requests so a wedged runtime fails fast instead of
         // hanging the suite; the activity interval itself is unbounded
         // (Python parity) and is bounded below by the outer timeout.
@@ -99,11 +103,6 @@ async fn real_runtime_smoke() {
         "expected a non-empty final_response"
     );
     assert!(!result.session_id.is_empty(), "session id present");
-    assert_eq!(
-        result.session_root.as_deref(),
-        Some(session_root.as_path()),
-        "configured session_root is surfaced on the RunResult"
-    );
 
     let response = &result.final_response;
     let preview: String = response.chars().take(200).collect();

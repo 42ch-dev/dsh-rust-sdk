@@ -19,7 +19,6 @@ categories = ["api-bindings", "asynchronous"]
 include = [
     "src/**",
     "tests/**",
-    "assets/cordis.yml",
     "/README.md",
     "/README.zh.md",
     "/README.i18n.yaml",
@@ -51,4 +50,9 @@ test = false
 [[bin]]
 name = "sleep-forever"
 path = "tests/fixtures/sleep_forever.rs"
+test = false
+
+[[bin]]
+name = "env-dump"
+path = "tests/fixtures/env_dump.rs"
 test = false

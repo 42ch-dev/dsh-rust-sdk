@@ -2,15 +2,15 @@
 //! runtime in the integration suite.
 //!
 //! The scenario script — a JSON array of [`directive::Directive`] — is read
-//! from a temp file whose path is passed as `--script-file <path>`: the
-//! harness writes the file, because a large scenario (e.g. the 4097-
-//! notification overflow script, >128 KiB of JSON) exceeds the Linux
-//! single-argument cap (`MAX_ARG_STRLEN`) and fails the spawn with E2BIG
-//! when passed inline. The inline JSON form is retained as a fallback for
-//! manual use. The peer then serves the client: requests arrive as JSON
-//! lines on stdin, frames (responses, notifications, garbage lines, blank
-//! lines) are written to stdout, one per line. Stdout is flushed after
-//! every frame because it is a pipe, not a terminal.
+//! from a temp file whose path is passed as `--patch <path>` (the launch
+//! model's overlay flag): the harness writes the file, because a large
+//! scenario (e.g. the 4097-notification overflow script, >128 KiB of JSON)
+//! exceeds the Linux single-argument cap (`MAX_ARG_STRLEN`) and fails the
+//! spawn with E2BIG when passed inline. The inline JSON form is retained as
+//! a fallback for manual use. The peer then serves the client: requests
+//! arrive as JSON lines on stdin, frames (responses, notifications, garbage
+//! lines, blank lines) are written to stdout, one per line. Stdout is
+//! flushed after every frame because it is a pipe, not a terminal.
 //!
 //! Registered as the `fake-runtime` bin target; integration tests reach it
 //! via `env!("CARGO_BIN_EXE_fake-runtime")`.
@@ -25,27 +25,58 @@ mod directive;
 use directive::Directive;
 
 fn main() {
-    // The harness always passes `--script-file <path>` (the scenario JSON
-    // can exceed the OS single-argument limit); the inline form is a
-    // fallback for manual use.
-    let script_json = match std::env::args().nth(1).as_deref() {
-        Some("--script-file") => {
-            let path = std::env::args()
-                .nth(2)
-                .expect("usage: fake-runtime --script-file <path>");
-            match std::fs::read_to_string(&path) {
-                Ok(script) => script,
-                Err(err) => {
-                    eprintln!("fake-runtime: cannot read scenario file {path:?}: {err}");
+    // The SDK launch model always passes `--profile <name>` first, then the
+    // scenario as a `--patch <path>` (the scenario JSON can exceed the OS
+    // single-argument limit); the inline form is a fallback for manual use.
+    let mut script_path: Option<String> = None;
+    let mut inline: Option<String> = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--profile" => {
+                // The profile name is consumed and ignored: the fixture
+                // stands in for the runtime, which would boot the profile.
+                if args.next().is_none() {
+                    eprintln!("fake-runtime: --profile needs a name");
+                    std::process::exit(2);
+                }
+            }
+            "--patch" => {
+                let Some(path) = args.next() else {
+                    eprintln!("fake-runtime: --patch needs a path");
+                    std::process::exit(2);
+                };
+                if script_path.is_some() {
+                    eprintln!("fake-runtime: repeated --patch is not supported");
+                    std::process::exit(2);
+                }
+                script_path = Some(path);
+            }
+            other => {
+                if inline.is_none() {
+                    inline = Some(other.to_string());
+                } else {
+                    eprintln!("fake-runtime: unexpected argument {other:?}");
                     std::process::exit(2);
                 }
             }
         }
-        Some(inline) => inline.to_string(),
-        None => {
-            eprintln!("usage: fake-runtime <scenario-json> | --script-file <path>");
-            std::process::exit(2);
-        }
+    }
+    let script_json = match script_path {
+        Some(path) => match std::fs::read_to_string(&path) {
+            Ok(script) => script,
+            Err(err) => {
+                eprintln!("fake-runtime: cannot read scenario file {path:?}: {err}");
+                std::process::exit(2);
+            }
+        },
+        None => match inline {
+            Some(json) => json,
+            None => {
+                eprintln!("usage: fake-runtime --profile <name> --patch <path> | <scenario-json>");
+                std::process::exit(2);
+            }
+        },
     };
     let script: Vec<Directive> = match serde_json::from_str(&script_json) {
         Ok(script) => script,

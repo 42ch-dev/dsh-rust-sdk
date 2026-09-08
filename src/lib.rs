@@ -14,43 +14,40 @@
 //! # Compatibility
 //!
 //! The **Python** SDK surface is the alignment baseline for types and errors
-//! that leak into the public API. The TypeScript SDK's `RunResult` lacks
-//! `finish_reason` and `session_root`; Rust intentionally follows Python, not
-//! TypeScript:
+//! that leak into the public API. [`RunResult`] mirrors Python's five fields
+//! exactly (`session_id`, `final_response`, `finish_reason`, `events`,
+//! `notifications`; upstream `python/sdk/src/deepseek_harness/api.py:40-46`);
+//! the TypeScript SDK's `RunResult` lacks `finish_reason`. Rust
+//! intentionally follows Python, not TypeScript:
 //!
 //! | Field | Python | TypeScript | Rust (this crate) |
 //! |---|---|---|---|
 //! | `session_id` / `sessionId` | yes | yes | [`RunResult::session_id`] |
 //! | `final_response` / `finalResponse` | yes | yes | [`RunResult::final_response`] |
-//! | `finish_reason` | yes (Python extension) | no | [`RunResult::finish_reason`] |
+//! | `finish_reason` | yes | no | [`RunResult::finish_reason`] |
 //! | `events` (root session only) | yes | yes | [`RunResult::events`] |
 //! | `notifications` (root + descendants) | yes | yes | [`RunResult::notifications`] |
-//! | `session_root` | yes (Python extension) | no | [`RunResult::session_root`] |
 //!
 //! (The table is mirrored in the crate README, `## RunResult alignment`;
 //! keep the two copies in sync.)
 //!
 //! # Environment injection
 //!
-//! [`DeepSeekHarness::start`] injects `DSH_CWD` always, and
-//! `DSH_SESSION_ROOT`, `DSH_CORDIS_CONFIG`, `DEEPSEEK_BASE_URL` /
-//! `DEEPSEEK_API_KEY` only when configured — each override wins over any
-//! inherited value (Python `dict.update` semantics), and the parent
-//! environment is otherwise inherited wholesale. With no effective
-//! `DSH_CORDIS_CONFIG` the SDK injects a bundled copy of the runtime's
-//! default `cordis.yml`.
-//!
-//! **Deliberate divergence from the Python SDK** (documented; do not "fix"
-//! to match Python): the Python SDK injects its bundled default only when
-//! the bundled runtime carrier is used. This crate is bring-your-own runtime
-//! (Plan A) — there is no bundled carrier — so the default is injected
-//! whenever no effective config exists, regardless of how the runtime binary
-//! was resolved.
+//! [`DeepSeekHarness::start`] boots the runtime under the configured
+//! `profile` (`dsh --profile <name> [--patch <path>]...`) and injects the
+//! resolved `DSH_HOME`, the caller's `Config::env` entries, and
+//! `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` when configured; the parent
+//! environment is otherwise inherited wholesale. The caller's `DSH_HOME`
+//! is an input to resolution (spec §3.2.1), not a post-resolution
+//! override: it is excluded from the verbatim passthrough, so the child
+//! always receives the resolved absolute, `~`-expanded home (spec §3.2.3).
+//! The crate never writes `DSH_CORDIS_CONFIG`, `DSH_SESSION_ROOT`, or
+//! `DSH_CWD` — none has a reader upstream — and filters them out of
+//! `Config::env` as well (spec §4.2).
 //!
 //! The runtime binary is bring-your-own (Plan A): [`DeepSeekHarness::start`]
-//! resolves it from `Config::runtime_bin` / `launch_args_override` or the
-//! `DSH_RUNTIME_BIN` environment variable. This crate never downloads or
-//! bundles a runtime — see
+//! resolves it from `Config::dsh_bin` or the `DSH_RUNTIME_BIN` environment
+//! variable. This crate never downloads or bundles a runtime — see
 //! <https://github.com/deepseek-ai/deepseek-harness> for the official runtime
 //! and its sources.
 //!
