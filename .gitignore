@@ -33,3 +33,5 @@ target
 !.mstar/knowledge/**
 !.mstar/specs/
 !.mstar/specs/**
+# .mstarc — repo-local harness config (may declare [config] harness_dir=<name>)
+.mstarc

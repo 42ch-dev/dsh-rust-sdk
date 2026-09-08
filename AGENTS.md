@@ -29,8 +29,7 @@ Rust SDK for DSH (DeepSeek Harness). Builds with Cargo (`cargo build` / `cargo t
 
 - Default working style: feature branches off `main` + PR; no direct pushes to `main` (repo rule "Changes must be made through a pull request"). Small doc/toolchain chores may go direct on owner instruction.
 - Branch/worktree alignment and QC checkout rules: `mstar-branch-worktree` skill; status/residual SSOT: `status.json` (see `.mstar/AGENTS.md`).
-- Never commit `status.json`, `plans/`, `iterations/`, `sdd/`, `notes.json` (process-local).
-- `.mstar/roadmap.md` is **local-only**: untracked, gitignored; do not `git add` it. Cross-clone durable roadmap content belongs in `.mstar/knowledge/` or this file.
+- Never commit `status.json`, `plans/`, `iterations/`, `sdd/`, `notes.json`, or the `projects/` project layer (process-local, gitignored). The roadmap SSOT is the `_default` project roadmap under that layer; the former root `roadmap.md` is legacy and has been merged into it. Cross-clone durable roadmap content belongs in `.mstar/knowledge/` or this file.
 
 ## Changelog fragments (release discipline)
 

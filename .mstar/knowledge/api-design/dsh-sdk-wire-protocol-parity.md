@@ -57,6 +57,40 @@ Upstream: https://github.com/deepseek-ai/deepseek-harness (the only permitted ci
 - Broadcast buffer is bounded (4096 default, `Lagged(n)` drop-oldest at the low level) — Python's queue is unbounded. `Session::run` fails fast with a typed `SdkProtocol` error when lag is observed mid-run (a dropped receipt or root-idle would otherwise hang or silently truncate); malformed inspected payloads likewise fail fast rather than warn-and-continue.
 - No protocol-level cancellation exists: abandoning a turn means closing the runtime. Documented in README; do not invent a cancel method.
 
+### Re-verified 2026-09-08 against upstream `c389f96bf3` (wire still true, launch contract NOT)
+
+A read-only three-track audit re-checked every fact above against the current
+upstream runtime and both official SDKs:
+
+- **Still true (no change needed)**: the three request methods, the four
+  notification names and payload shapes, `serverInfo` name/version, framing,
+  malformed-line skipping, the `inserted[].id` receipt, and the 400-line stderr
+  tail. **The three traps above remain correct.** `ContentBlockMap` gained a
+  sixth variant (`file`) — `Unknown` passthrough already preserves it, so only
+  typed access is missing.
+- **No longer true — launch/env contract**: the upstream runtime is now the
+  `dsh` CLI under a required `--profile` (`sdk` / `sdk-minimal`) with an explicit
+  `DSH_HOME`. `DSH_CORDIS_CONFIG`, `DSH_SESSION_ROOT`, and `DSH_CWD` have **no
+  reader upstream**; the bundled default `cordis.yml` was deleted and the
+  package it mounts no longer exists. The "bundled default config injection"
+  bullet above therefore describes a dead mechanism, not a live divergence.
+  The tracked re-alignment work is the launch-contract goal in the local
+  project roadmap (see the roadmap SSOT note in the repo `AGENTS.md`).
+- **Parity baseline moved**: upstream Python `RunResult` dropped `session_root`
+  (5 fields now) and its config dropped `session_root` / `cordis` /
+  `runtime_bin` / `launch_args_override`; it gained `reasoning_effort`,
+  `profile`, `patches`, `dsh_home`, and a 30 s `initialize` timeout. The
+  `initialize` params also accept an optional `reasoningEffort`.
+- **Session format v2**: the former per-token assistant-chunk event is gone;
+  the assistant-message event now carries an embedded stream payload and the new
+  assistant-attempt event exists. Client impact is limited — events are
+  opaque `Value` here and the derivations read unchanged paths.
+
+Evidence: three read-only audit reports (upstream change inventory, wire/API
+parity diff, runtime-compatibility and coverage gaps) plus a PM consolidated
+verdict, all held as local process artifacts; the reusable facts are captured
+in this document so they survive without those files.
+
 ## Why This Matters
 
 Every one of the three traps produces a client that **compiles, passes surface-level tests, and hangs or misdiagnoses in production** (receipt never matches; prelude chatter kills the transport; death diagnostics lose stderr/exit evidence). The parity decisions above are locked product behavior backed by compass AC; silently reverting any of them is a spec violation even when it "matches Python better".
@@ -64,7 +98,7 @@ Every one of the three traps produces a client that **compiles, passes surface-l
 ## When to Apply
 
 - New protocol methods or notification types: extend `src/protocol.rs` with Unknown-tolerant parsing; never `deny_unknown_fields`.
-- Runtime-bin companion crate (`.mstar/roadmap.md` `runtime-bin-delivery`): platform matrix is linux-x64 / linux-arm64 / macos-arm64 (CI publishes exactly these three; macOS needs the sibling `-spawn-helper`).
+- Runtime-bin companion crate (durable item `runtime-bin-delivery`, tracked in the local project roadmap): platform matrix is linux-x64 / linux-arm64 / macos-arm64 (CI publishes exactly these three; macOS needs the sibling `-spawn-helper`).
 - Protocol bumps (`serverInfo.version` leaving 0.0.1): revisit the strict-name check and the no-negotiation stance together.
 
 ## Examples
