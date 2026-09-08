@@ -398,9 +398,9 @@ async fn start_bounds_initialize_handshake_via_config() {
     );
     match &err {
         Error::RequestTimeout { method, .. } => {
-            assert!(
-                method.starts_with("initialize"),
-                "the timed-out method must still be identifiable: {method}"
+            assert_eq!(
+                method, "initialize",
+                "the method must stay the exact wire method name (spec §7): {method}"
             );
             assert!(
                 err.to_string().contains("selected dsh profile 'sdk'"),

@@ -14,7 +14,7 @@ use tokio::sync::{broadcast, oneshot, Notify};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::error::{Error, SelectedProfile};
+use crate::error::{Error, SelectedProfile, TimeoutSource};
 use crate::protocol::{
     ContentBlock, InitializeParams, InitializeResult, Notification, SessionPromptParams,
     SessionPromptResult,
@@ -350,12 +350,12 @@ impl HarnessClient {
                     // response is dropped; the server-side work continues.
                     lock(&self.pending).remove(&id);
                     return Err(Error::RequestTimeout {
-                        // The selected profile rides in the message, not the
-                        // public variant shape (spec §7): `SelectedProfile`
-                        // renders the parenthetical suffix, or nothing when
-                        // the timeout path has no profile context.
-                        method: format!("{method}{profile}"),
-                        source: elapsed,
+                        // The method stays the exact wire method name (spec
+                        // §7); the selected profile rides in the source
+                        // carrier's message, or nothing when the timeout
+                        // path has no profile context.
+                        method: method.to_string(),
+                        source: TimeoutSource::new(elapsed, profile),
                     });
                 }
             },
