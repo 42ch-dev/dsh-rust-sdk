@@ -27,30 +27,54 @@ mod common;
 
 /// Best-effort probe of the resolved runtime's own version (`dsh --version`),
 /// so the notice reports the version the test actually ran against instead of
-/// a hard-coded literal. Returns `None` when the probe fails (non-zero exit,
+/// a hard-coded literal. Bounded to 5 s so a wedged `dsh --version` cannot
+/// hang the test or the CI job (qc3 F-003); the child is reaped on expiry.
+/// Returns `None` when the probe fails (timeout, spawn error, non-zero exit,
 /// empty or non-UTF-8 output) — the notice then degrades to "version unknown"
 /// and the test itself is never blocked by the probe.
-fn probe_dsh_version(runtime_bin: &str) -> Option<String> {
-    let output = std::process::Command::new(runtime_bin)
+async fn probe_dsh_version(runtime_bin: &str) -> Option<String> {
+    let mut child = tokio::process::Command::new(runtime_bin)
         .arg("--version")
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .ok()?;
-    if !output.status.success() {
+
+    let status = match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        Ok(result) => result.ok()?,
+        Err(_) => {
+            // Bound exceeded: reap the child so nothing keeps running.
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return None;
+        }
+    };
+    if !status.success() {
         return None;
     }
-    let version = String::from_utf8(output.stdout).ok()?.trim().to_owned();
+
+    // The child has exited, so reading the pipe reaches EOF and cannot hang.
+    use tokio::io::AsyncReadExt;
+    let mut stdout = child.stdout.take()?;
+    let mut out = String::new();
+    stdout.read_to_string(&mut out).await.ok()?;
+    let version = out.trim().to_owned();
     (!version.is_empty()).then_some(version)
 }
 
-/// Resolve the runtime binary: `DSH_RUNTIME_BIN` (non-empty) first, then
-/// `dsh` on `PATH`. Returns `None` when neither exists, so the caller can
-/// skip cleanly instead of failing.
+/// Resolve the runtime binary: `DSH_RUNTIME_BIN` (non-empty and existing)
+/// first, then `dsh` on `PATH`. Returns `None` when neither exists, so the
+/// caller can skip cleanly instead of failing.
 fn resolve_runtime_bin() -> Option<String> {
     if let Some(bin) = std::env::var("DSH_RUNTIME_BIN")
         .ok()
         .filter(|bin| !bin.trim().is_empty())
     {
-        return Some(bin);
+        // Same existence gate as the PATH branch below: a stale env var
+        // pointing at a deleted binary skips cleanly instead of hard-failing
+        // at spawn (qc3 F-002).
+        let candidate = PathBuf::from(&bin);
+        return candidate.is_file().then_some(bin);
     }
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
@@ -110,7 +134,9 @@ async fn real_runtime_handshake() {
     println!(
         "real-runtime handshake ok: dsh={runtime_bin} dsh_home={} (dsh {})",
         dsh_home.display(),
-        probe_dsh_version(&runtime_bin).unwrap_or_else(|| "version unknown".into())
+        probe_dsh_version(&runtime_bin)
+            .await
+            .unwrap_or_else(|| "version unknown".into())
     );
 }
 
