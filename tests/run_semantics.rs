@@ -823,3 +823,45 @@ async fn on_notification_callback_observes_every_tree_notification_in_order() {
     // is identical to the no-callback path (spec §6.5 rule 3).
     assert_eq!(result, baseline);
 }
+
+#[test]
+fn callback_panic_propagates_out_of_run() {
+    // spec §6.5 rule 5: a panic in the callback is a caller bug and MUST
+    // propagate; the crate MUST NOT swallow it. Drive `run` on a fresh
+    // current-thread runtime inside `catch_unwind` so the callback's
+    // panic unwinds through the crate and is observed here — a swallowed
+    // panic would make `run` return normally and this assertion fail.
+    let mut script = run_prefix("msg-panic");
+    script.push(emit(
+        "session.event",
+        root_event(receipt_event("msg-panic")),
+    ));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rt.block_on(async {
+            let h = harness(&script).await;
+            let session = h.start_session(Some(ROOT_SESSION.to_string()));
+            let _ = session
+                .run(
+                    Input::Text("hello".to_string()),
+                    Some(&|_notification: &Notification| {
+                        panic!("callback panic must propagate (spec §6.5 rule 5)")
+                    }),
+                )
+                .await;
+        })
+    }));
+    let panic = outcome.expect_err("the callback panic must not be swallowed by run()");
+    let message = panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("<non-string panic>");
+    assert!(
+        message.contains("callback panic must propagate"),
+        "the propagated panic must be the callback's, not a harness panic: {message}"
+    );
+}
