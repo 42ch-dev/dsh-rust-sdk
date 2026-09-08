@@ -124,10 +124,11 @@ even on first boot).
 
 ### Route B — build from source
 
-Build the runtime executable from the official repository with
-`scripts/build-exe-for-python-sdk.ts`, then point `DSH_RUNTIME_BIN` (or
-`Config::dsh_bin`) at the built executable. This is the route to use when the
-published wheel does not cover your platform.
+Build the runtime executable from source with the
+`build-exe-for-python-sdk` script from the
+[official repository](https://github.com/deepseek-ai/deepseek-harness), then
+point `DSH_RUNTIME_BIN` (or `Config::dsh_bin`) at the built executable. This
+is the route to use when the published wheel does not cover your platform.
 
 ### How the SDK resolves the runtime
 

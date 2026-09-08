@@ -116,9 +116,10 @@ export DSH_RUNTIME_BIN="$(python -c 'import deepseek_harness_runtime as r; print
 
 ### 途径 B —— 从源码构建
 
-用官方仓库中的 `scripts/build-exe-for-python-sdk.ts` 构建运行时可执行
-文件，然后把 `DSH_RUNTIME_BIN`（或 `Config::dsh_bin`）指向构建产物。当
-已发布的 wheel 不覆盖你的平台时，使用这条途径。
+用[官方仓库](https://github.com/deepseek-ai/deepseek-harness)中的
+`build-exe-for-python-sdk` 脚本构建运行时可执行文件，然后把
+`DSH_RUNTIME_BIN`（或 `Config::dsh_bin`）指向构建产物。当已发布的 wheel
+不覆盖你的平台时，使用这条途径。
 
 ### SDK 如何解析运行时
 
