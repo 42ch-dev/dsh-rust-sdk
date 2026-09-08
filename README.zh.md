@@ -329,14 +329,15 @@ drop-oldest 语义的广播通道。如果高流量会话树在 SDK 两次读取
 
 ## 环境变量
 
-父进程环境整体继承；SDK 只注入或覆盖下表所列键（对其余键，调用方
-`Config::env` 在冲突时优先于 crate 注入值——Python `dict.update` 语义）：
+父进程环境整体继承；SDK 只注入或覆盖下表所列键。crate 注入值先应用，
+调用方 `Config::env` 条目随后应用，因此冲突时调用方的值优先（Python
+`dict.update` 语义）——`DSH_HOME` 除外：它走解析，绝不被解析后覆盖：
 
 | 变量 | 作用 | 语义 |
 |---|---|---|
 | `DSH_HOME` | harness 主目录（子进程环境） | 始终写入解析后的绝对、`~` 已展开主目录。调用方的值只是**解析输入**（`Config::dsh_home` → 非空 `DSH_HOME` → `~/.dsh`），不是解析后的覆盖；可用 `Config::resolve_dsh_home` / `DeepSeekHarness::dsh_home` 读回所选值 |
 | `DSH_RUNTIME_BIN` | 运行时二进制解析 | 当 `Config::dsh_bin` 未设置时被查阅；空值视为不存在。在 `runtime_bin` → `dsh_bin` 改名后被显式保留（非兼容垫片） |
-| `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` | 模型端点与凭据 | 原样继承；仅在配置了 `Config::base_url` / `Config::api_key` 时被覆盖 |
+| `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` | 模型端点与凭据 | 原样继承；配置了 `Config::base_url` / `Config::api_key` 时注入覆盖值，且调用方在 `Config::env` 中提供的同名条目在注入之后应用，冲突时以调用方为准 |
 | `DSH_CORDIS_CONFIG` / `DSH_SESSION_ROOT` / `DSH_CWD` | 已移除——绝不写入 | 上游已无读取方；见[移除表面（v0.1 → 当前）](#移除表面v01--当前) |
 
 ## 刻意分歧

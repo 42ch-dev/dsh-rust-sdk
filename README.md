@@ -365,14 +365,16 @@ notification, pass the per-notification callback to `Session::run` (above).
 ## Environment variables
 
 The parent environment is inherited wholesale; the SDK injects or overrides
-only the keys below (for other keys, the caller's `Config::env` wins over
-crate-injected values on collision — Python `dict.update` semantics):
+only the keys below. Crate-injected values are applied first and the caller's
+`Config::env` entries are applied after, so on collision the caller's value
+wins (Python `dict.update` semantics) — except `DSH_HOME`, which is resolved,
+never post-resolution overridden:
 
 | Variable | Role | Semantics |
 |---|---|---|
 | `DSH_HOME` | Harness home (child env) | Always written with the resolved absolute, `~`-expanded home. The caller's value is an **input to resolution** (`Config::dsh_home` → non-empty `DSH_HOME` → `~/.dsh`), not a post-resolution override; read the selection back via `Config::resolve_dsh_home` / `DeepSeekHarness::dsh_home` |
 | `DSH_RUNTIME_BIN` | Runtime binary resolution | Consulted when `Config::dsh_bin` is not set; empty counts as absent. Explicitly preserved after the `runtime_bin` → `dsh_bin` rename (not a compatibility shim) |
-| `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` | Model endpoint and credentials | Inherited as-is; overridden only when `Config::base_url` / `Config::api_key` is configured |
+| `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` | Model endpoint and credentials | Inherited as-is; overridden when `Config::base_url` / `Config::api_key` is configured, and a caller-supplied `Config::env` entry for either key is applied after injection and wins on collision |
 | `DSH_CORDIS_CONFIG` / `DSH_SESSION_ROOT` / `DSH_CWD` | Removed — never written | No reader upstream; see the [removal table](#removed-surface-v01--current) |
 
 ## Deliberate divergences
