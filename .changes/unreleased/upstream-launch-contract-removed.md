@@ -1,0 +1,12 @@
+---
+category: Removed
+---
+- `Config::session_root` is removed; use `Config::dsh_home` — sessions live under the resolved `$DSH_HOME/sessions` instead.
+- `Config::cordis_config` and the `DSH_CORDIS_CONFIG` environment injection are removed; use the profile tree (`Config::profile` + `Config::patches`) — no config file is passed to the runtime.
+- The `DSH_SESSION_ROOT` and `DSH_CWD` environment injections are removed; sessions live under the resolved `DSH_HOME`, and the workspace directory reaches the runtime as `Config::cwd` (sent as `initialize.cwd`).
+- `RunResult::session_root` is dropped with no replacement — upstream removed it and asserts its absence.
+- `Config::launch_args_override` is removed; use `Config::dsh_bin` + `Config::profile` + `Config::patches` — the launch is composed from typed fields, not an opaque argv.
+- `Config::runtime_bin` is renamed to `Config::dsh_bin` (the `DSH_RUNTIME_BIN` environment override is preserved).
+- The bundled `assets/cordis.yml` is removed; use the profile bundle shipped with the runtime instead.
+- The `assets/cordis.yml` entry in `Cargo.toml [package] include` is removed; the file no longer exists, and the profile bundle replaces the deleted asset.
+- `DEFAULT_CORDIS_YML` and `bundled_default_config_path` are removed; use the profile bundle instead.

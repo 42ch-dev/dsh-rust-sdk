@@ -16,9 +16,9 @@
 //! The **Python** SDK surface is the alignment baseline for types and errors
 //! that leak into the public API. [`RunResult`] mirrors Python's five fields
 //! exactly (`session_id`, `final_response`, `finish_reason`, `events`,
-//! `notifications`; upstream `python/sdk/src/deepseek_harness/api.py:40-46`);
-//! the TypeScript SDK's `RunResult` lacks `finish_reason`. Rust
-//! intentionally follows Python, not TypeScript:
+//! `notifications`) — there is no `session_root`, which upstream removed and
+//! asserts its absence. The TypeScript SDK's `RunResult` lacks
+//! `finish_reason`. Rust intentionally follows Python, not TypeScript:
 //!
 //! | Field | Python | TypeScript | Rust (this crate) |
 //! |---|---|---|---|
@@ -27,9 +27,10 @@
 //! | `finish_reason` | yes | no | [`RunResult::finish_reason`] |
 //! | `events` (root session only) | yes | yes | [`RunResult::events`] |
 //! | `notifications` (root + descendants) | yes | yes | [`RunResult::notifications`] |
+//! | `session_root` | no (removed) | no | does not exist |
 //!
-//! (The table is mirrored in the crate README, `## RunResult alignment`;
-//! keep the two copies in sync.)
+//! (The table is mirrored in the crate README, `### RunResult`; keep the two
+//! copies in sync.)
 //!
 //! # Environment injection
 //!
@@ -38,12 +39,11 @@
 //! resolved `DSH_HOME`, the caller's `Config::env` entries, and
 //! `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` when configured; the parent
 //! environment is otherwise inherited wholesale. The caller's `DSH_HOME`
-//! is an input to resolution (spec §3.2.1), not a post-resolution
-//! override: it is excluded from the verbatim passthrough, so the child
-//! always receives the resolved absolute, `~`-expanded home (spec §3.2.3).
-//! The crate never writes `DSH_CORDIS_CONFIG`, `DSH_SESSION_ROOT`, or
-//! `DSH_CWD` — none has a reader upstream — and filters them out of
-//! `Config::env` as well (spec §4.2).
+//! is an input to resolution, not a post-resolution override: it is
+//! excluded from the verbatim passthrough, so the child always receives
+//! the resolved absolute, `~`-expanded home. The crate never writes
+//! `DSH_CORDIS_CONFIG`, `DSH_SESSION_ROOT`, or `DSH_CWD` — none has a
+//! reader upstream — and filters them out of `Config::env` as well.
 //!
 //! The runtime binary is bring-your-own (Plan A): [`DeepSeekHarness::start`]
 //! resolves it from `Config::dsh_bin` or the `DSH_RUNTIME_BIN` environment
@@ -51,15 +51,45 @@
 //! <https://github.com/deepseek-ai/deepseek-harness> for the official runtime
 //! and its sources.
 //!
+//! # Platform support
+//!
+//! The crate itself is pure Rust and platform-light; the consumed runtime
+//! decides the platform matrix. Upstream publishes the runtime for **5
+//! targets**: Linux x64, Linux arm64, macOS arm64, macOS x64, and Windows
+//! x64.
+//!
+//! # Deliberate divergences
+//!
+//! The divergences below are deliberate and documented (wire spec §7); a
+//! contributor must not "fix" one back to reference behaviour without a
+//! superseding spec decision:
+//!
+//! - **`DSH_HOME` fallback** — the crate resolves `~/.dsh` where Python
+//!   raises `ValueError`.
+//! - **No client-directed request API** — Python exposes `next_request` /
+//!   `respond` / `notify`; the crate exposes none (the runtime emits no
+//!   client-directed requests; they are auto-answered `-32601`). Non-goal,
+//!   not a gap.
+//! - **Stricter malformed-notification policy** — a `session.event` /
+//!   `session.status` whose payload fails its shape check fails the run
+//!   with `Error::SdkProtocol`; Python silently skips a malformed
+//!   event/status. This converts a silent hang into a typed failure and is
+//!   **not** Python parity.
+//! - **Strict `serverInfo.name` equality** — `initialize` requires the
+//!   identity to be exactly `deepseek-harness-sdk-runtime`; an upstream
+//!   rename fails loudly instead of being silently accepted.
+//! - **No `run()` convenience, no lazy start** — the crate requires an
+//!   explicit [`DeepSeekHarness::start`]; Python and the TypeScript SDK can
+//!   start lazily on first use. Non-goal, not a gap.
+//!
 //! # Non-goals
 //!
 //! - **No cancellation**: there is no session-close / cancel RPC.
 //!   [`Session::run`] waits for root `idle`; closing the harness mid-turn
 //!   abandons the turn.
-//! - **No Windows support** (consumed platforms: linux-x64, linux-arm64,
-//!   macos-arm64).
-//! - (The README lists the remaining non-goals: no runtime delivery /
-//!   bundling, no crates.io publish, no TypeScript-parity helper.)
+//! - (The README's Known limitations list the remaining non-goals: no
+//!   runtime binary delivery / bundling / download, no version
+//!   negotiation.)
 
 pub mod api;
 pub mod client;
