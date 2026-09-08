@@ -23,11 +23,15 @@
 //! `$DSH_HOME` from `Config::env`, then the parent environment, else
 //! `~/.dsh` — upstream `resolveDshHome`,
 //! `packages/util/home-paths/src/index.ts:87-91`), the
-//! caller's `Config::env` entries (verbatim, except that the three
-//! forbidden keys of spec §4.2 are filtered out under any configuration),
-//! and `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` when configured. The
-//! caller's `Config::env` wins over the injected `DSH_HOME` on collision
-//! (Python `env.update(self.config.env)` ordering,
+//! caller's `Config::env` entries (verbatim, except that `DSH_HOME` and
+//! the three forbidden keys of spec §4.2 are filtered out under any
+//! configuration), and `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` when
+//! configured. The caller's `DSH_HOME` is an **input to resolution**
+//! (spec §3.2.1), not a post-resolution override: it is excluded from the
+//! verbatim passthrough, so the child always receives the resolved
+//! absolute, `~`-expanded home (spec §3.2.3). Every other caller key keeps
+//! verbatim passthrough and wins over the crate-injected values on
+//! collision (Python `env.update(self.config.env)` ordering,
 //! `python/sdk/src/deepseek_harness/client.py:75-77`). The crate never
 //! writes `DSH_CORDIS_CONFIG`, `DSH_SESSION_ROOT`, or `DSH_CWD` — none has
 //! a reader upstream (spec §4.2).
@@ -101,8 +105,11 @@ pub struct Config {
     /// [`Config::resolve_dsh_home`] (Python `dsh_home`,
     /// `python/sdk/src/deepseek_harness/api.py:32`; spec §3).
     pub dsh_home: Option<PathBuf>,
-    /// Extra environment entries layered over the parent environment; the
-    /// caller's entries win over the crate-injected `DSH_HOME` on collision
+    /// Extra environment entries layered over the parent environment.
+    /// `DSH_HOME` here is an input to resolution (spec §3.2.1) and is
+    /// excluded from the verbatim passthrough — the child always receives
+    /// the resolved absolute home. Every other caller entry keeps verbatim
+    /// passthrough and wins over the crate-injected values on collision
     /// (Python `env.update(self.config.env)` ordering).
     pub env: Option<HashMap<String, String>>,
     /// `initialize` handshake deadline (Python
@@ -274,14 +281,17 @@ const FORBIDDEN_ENV_KEYS: [&str; 3] = ["DSH_CORDIS_CONFIG", "DSH_SESSION_ROOT", 
 ///
 /// Returns exactly the applicable override keys, in a stable order: the
 /// resolved `DSH_HOME` first, then the caller's `Config::env` entries
-/// (verbatim, except that the three forbidden keys of spec §4.2 are
-/// filtered out under any configuration), then `DEEPSEEK_BASE_URL` /
-/// `DEEPSEEK_API_KEY` when configured. When a key appears twice, the later
-/// entry wins at spawn, so the caller's `Config::env` overrides the
-/// injected `DSH_HOME` on collision (Python `env.update(self.config.env)`
-/// ordering — `python/sdk/src/deepseek_harness/client.py:75-77`). Every
-/// other variable is inherited wholesale from the parent environment by the
-/// spawn layer.
+/// (verbatim, except that `DSH_HOME` and the three forbidden keys of spec
+/// §4.2 are filtered out under any configuration), then
+/// `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` when configured. The caller's
+/// `DSH_HOME` is an **input to resolution** (spec §3.2.1), not a
+/// post-resolution override: excluding it from the passthrough guarantees
+/// the child always receives the resolved absolute, `~`-expanded home
+/// (spec §3.2.3). When any other key appears twice, the later entry wins at
+/// spawn, so the caller's `Config::env` overrides the crate-injected
+/// values on collision (Python `env.update(self.config.env)` ordering —
+/// `python/sdk/src/deepseek_harness/client.py:75-77`). Every other variable
+/// is inherited wholesale from the parent environment by the spawn layer.
 ///
 /// The crate never writes `DSH_CORDIS_CONFIG`, `DSH_SESSION_ROOT`, or
 /// `DSH_CWD` — none has a reader upstream (spec §4.2).
@@ -295,8 +305,10 @@ fn compose_env_with(
     config: &Config,
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Result<Vec<(String, String)>, Error> {
-    // The resolved home is injected first so the caller's Config::env wins
-    // on collision (later entry wins at spawn).
+    // The resolved home is injected first; `DSH_HOME` is excluded from the
+    // caller-env passthrough below (PM resolution 2026-09-08), so no later
+    // entry can replace it — the child always receives the resolved
+    // absolute, `~`-expanded home.
     let mut envs = vec![(
         "DSH_HOME".to_string(),
         resolve_dsh_home_with(config, &lookup)
@@ -310,7 +322,14 @@ fn compose_env_with(
                 // Spec §4.2 forbids the three keys under any configuration,
                 // which overrides the §4.1 verbatim rule for those names:
                 // they are filtered out even when the caller supplies them.
-                .filter(|(key, _)| !FORBIDDEN_ENV_KEYS.contains(&key.as_str()))
+                // `DSH_HOME` gets the same treatment (PM resolution
+                // 2026-09-08): the caller's `DSH_HOME` is an input to
+                // resolution (spec §3.2.1), not a post-resolution override,
+                // so the child always receives the resolved absolute,
+                // `~`-expanded home (spec §3.2.3).
+                .filter(|(key, _)| {
+                    !FORBIDDEN_ENV_KEYS.contains(&key.as_str()) && key.as_str() != "DSH_HOME"
+                })
                 .map(|(key, value)| (key.clone(), value.clone())),
         );
     }
@@ -673,7 +692,13 @@ mod tests {
     }
 
     #[test]
-    fn compose_env_caller_env_wins_over_injected_dsh_home() {
+    fn compose_env_caller_dsh_home_selects_home_via_resolution() {
+        // PM resolution (2026-09-08): the caller's DSH_HOME is an input to
+        // resolution (spec §3.2.1), not a post-resolution override. It is
+        // excluded from the verbatim passthrough, so the child env carries
+        // the resolved value — here the caller's Config::env DSH_HOME
+        // selects the home (it is checked before the parent env),
+        // normalized absolute.
         let env: HashMap<&'static str, &'static str> =
             HashMap::from([("DSH_HOME", "/inherited/home")]);
         let config = Config {
@@ -687,7 +712,118 @@ mod tests {
         assert_eq!(
             map.get("DSH_HOME").map(String::as_str),
             Some("/caller/home"),
-            "the caller's Config::env must win over the injected DSH_HOME"
+            "the caller's Config::env DSH_HOME selects the home via resolution; \
+             the child env carries the resolved value"
+        );
+    }
+
+    #[test]
+    fn compose_env_blank_caller_dsh_home_never_reaches_child() {
+        // A blank/whitespace caller DSH_HOME counts as unset in resolution
+        // (spec §3.2.2) and is excluded from the passthrough, so the child
+        // env carries the resolved home — never the blank value.
+        let env: HashMap<&'static str, &'static str> =
+            HashMap::from([("DSH_HOME", "/inherited/home")]);
+        for blank in ["", "   ", "\t"] {
+            let config = Config {
+                env: Some(HashMap::from([("DSH_HOME".into(), blank.to_string())])),
+                ..Config::default()
+            };
+            let map: HashMap<_, _> = compose_env_with(&config, lookup(&env))
+                .unwrap()
+                .into_iter()
+                .collect();
+            assert_eq!(
+                map.get("DSH_HOME").map(String::as_str),
+                Some("/inherited/home"),
+                "a blank caller DSH_HOME {blank:?} must fall through to the \
+                 parent env in the composed child env"
+            );
+        }
+    }
+
+    #[test]
+    fn compose_env_tilde_relative_caller_dsh_home_is_expanded_in_child() {
+        // A `~`-relative caller DSH_HOME selects the home via resolution
+        // and is excluded from the passthrough: the child env carries the
+        // resolved absolute, `~`-expanded value (spec §3.2.3).
+        let empty_env = HashMap::new();
+        let config = Config {
+            env: Some(HashMap::from([(
+                "DSH_HOME".into(),
+                "~/dsh-test-home".into(),
+            )])),
+            ..Config::default()
+        };
+        let map: HashMap<_, _> = compose_env_with(&config, lookup(&empty_env))
+            .unwrap()
+            .into_iter()
+            .collect();
+        let home = map.get("DSH_HOME").expect("a home always resolves");
+        assert!(
+            Path::new(home).is_absolute(),
+            "the child DSH_HOME must be absolute: {home:?}"
+        );
+        assert!(
+            !home.contains('~'),
+            "the child DSH_HOME must have ~ expanded: {home:?}"
+        );
+        assert_eq!(
+            home,
+            &default_home()
+                .parent()
+                .unwrap()
+                .join("dsh-test-home")
+                .to_string_lossy()
+                .into_owned(),
+            "the child DSH_HOME must be the resolved ~-expanded home"
+        );
+    }
+
+    #[test]
+    fn compose_env_relative_caller_dsh_home_is_resolved_absolute_in_child() {
+        // A relative caller DSH_HOME selects the home via resolution and is
+        // excluded from the passthrough: the child env carries the resolved
+        // absolute value (spec §3.2.3), never the raw relative string.
+        let empty_env = HashMap::new();
+        let config = Config {
+            env: Some(HashMap::from([("DSH_HOME".into(), "relative/home".into())])),
+            ..Config::default()
+        };
+        let map: HashMap<_, _> = compose_env_with(&config, lookup(&empty_env))
+            .unwrap()
+            .into_iter()
+            .collect();
+        let home = map.get("DSH_HOME").expect("a home always resolves");
+        assert!(
+            Path::new(home).is_absolute(),
+            "the child DSH_HOME must be absolute: {home:?}"
+        );
+        assert_ne!(
+            home, "relative/home",
+            "the raw relative caller value must never reach the child"
+        );
+    }
+
+    #[test]
+    fn compose_env_explicit_dsh_home_wins_over_conflicting_caller_env() {
+        // Explicit Config::dsh_home is the highest-precedence selection rule
+        // (spec §3.1); a conflicting caller DSH_HOME is excluded from the
+        // passthrough, so the composed child env carries the explicit home.
+        let empty_env = HashMap::new();
+        let config = Config {
+            dsh_home: Some(PathBuf::from("/configured/home")),
+            env: Some(HashMap::from([("DSH_HOME".into(), "/caller/home".into())])),
+            ..Config::default()
+        };
+        let map: HashMap<_, _> = compose_env_with(&config, lookup(&empty_env))
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert_eq!(
+            map.get("DSH_HOME").map(String::as_str),
+            Some("/configured/home"),
+            "explicit Config::dsh_home must win in the composed child env"
         );
     }
 

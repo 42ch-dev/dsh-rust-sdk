@@ -10,13 +10,15 @@ mod common;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use deepseek_harness_sdk::{ClientTimeouts, ContentBlock, Error, HarnessClient, LaunchSpec};
+use deepseek_harness_sdk::{
+    ClientTimeouts, ContentBlock, DeepSeekHarness, Error, HarnessClient, LaunchSpec,
+};
 use serde_json::{json, Value};
 
 use common::fake_runtime::{
     emit, emit_blank, emit_raw, emit_stderr, exit, expect, expect_frame, expect_params,
-    fake_runtime_spec, ignore_all, respond, respond_error, server_info_result, sleep_forever_bin,
-    sleep_ms, test_timeouts, FakeRuntime,
+    fake_runtime_spec, harness_config, ignore_all, respond, respond_error, server_info_result,
+    sleep_forever_bin, sleep_ms, test_timeouts, FakeRuntime,
 };
 
 /// The canonical client-side session ids used across scenarios.
@@ -521,4 +523,35 @@ async fn malformed_and_blank_lines_are_skipped_not_fatal() {
     assert_eq!(message_id, "msg-after-garbage");
 
     rt.client.close().await.expect("clean close");
+}
+
+#[tokio::test]
+async fn start_creates_missing_configured_home_before_launch() {
+    // Spec §3.2.5: the resolved harness home is created when absent so a
+    // fresh home boots. The configured home is a unique temp dir that does
+    // not exist yet — the real ~/.dsh is never touched.
+    let config = harness_config(&[
+        expect_params(
+            "initialize",
+            json!({
+                "provider": "deepseek-official",
+                "model": "deepseek-v4-flash",
+            }),
+        ),
+        respond(server_info_result()),
+    ])
+    .expect("serialize script");
+    let home = config.dsh_home.clone().expect("temp home configured");
+    assert!(
+        !home.exists(),
+        "precondition: the temp home must not exist before start"
+    );
+    let mut harness = DeepSeekHarness::start(config)
+        .await
+        .expect("harness starts");
+    assert!(
+        home.is_dir(),
+        "the resolved home must be created before the child is launched"
+    );
+    harness.close().await.expect("clean close");
 }

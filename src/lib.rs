@@ -36,10 +36,13 @@
 //! `profile` (`dsh --profile <name> [--patch <path>]...`) and injects the
 //! resolved `DSH_HOME`, the caller's `Config::env` entries, and
 //! `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` when configured; the parent
-//! environment is otherwise inherited wholesale. The crate never writes
-//! `DSH_CORDIS_CONFIG`, `DSH_SESSION_ROOT`, or `DSH_CWD` — none has a
-//! reader upstream — and filters them out of `Config::env` as well (spec
-//! §4.2).
+//! environment is otherwise inherited wholesale. The caller's `DSH_HOME`
+//! is an input to resolution (spec §3.2.1), not a post-resolution
+//! override: it is excluded from the verbatim passthrough, so the child
+//! always receives the resolved absolute, `~`-expanded home (spec §3.2.3).
+//! The crate never writes `DSH_CORDIS_CONFIG`, `DSH_SESSION_ROOT`, or
+//! `DSH_CWD` — none has a reader upstream — and filters them out of
+//! `Config::env` as well (spec §4.2).
 //!
 //! The runtime binary is bring-your-own (Plan A): [`DeepSeekHarness::start`]
 //! resolves it from `Config::dsh_bin` or the `DSH_RUNTIME_BIN` environment
