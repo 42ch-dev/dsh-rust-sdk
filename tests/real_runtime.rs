@@ -22,10 +22,10 @@ use deepseek_harness_sdk::{Config, DeepSeekHarness, Input};
 #[tokio::test]
 async fn real_runtime_smoke() {
     // Runtime gating — read at runtime, not at compile time.
-    let runtime_bin = std::env::var("DSH_RUNTIME_BIN")
+    let runtime_path = std::env::var("DSH_RUNTIME_BIN")
         .ok()
         .filter(|bin| !bin.trim().is_empty());
-    let Some(runtime_bin) = runtime_bin else {
+    let Some(runtime_path) = runtime_path else {
         eprintln!(
             "skipping real-runtime smoke: DSH_RUNTIME_BIN is unset or empty; \
              set it to a DeepSeek Harness runtime binary \
@@ -58,7 +58,7 @@ async fn real_runtime_smoke() {
     std::fs::create_dir_all(&dsh_home).expect("create temp harness home");
 
     let mut harness = DeepSeekHarness::start(Config {
-        dsh_bin: Some(runtime_bin),
+        dsh_bin: Some(runtime_path),
         api_key: Some(api_key),
         dsh_home: Some(dsh_home.clone()),
         // Bound the wire requests so a wedged runtime fails fast instead of

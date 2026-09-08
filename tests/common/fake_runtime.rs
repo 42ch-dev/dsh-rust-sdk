@@ -33,7 +33,7 @@ pub fn test_timeouts() -> ClientTimeouts {
 
 /// Absolute path to the `fake-runtime` fixture binary. Cargo sets
 /// `CARGO_BIN_EXE_<name>` for integration tests at compile time.
-pub fn fake_runtime_bin() -> &'static str {
+pub fn fake_runtime_path() -> &'static str {
     env!("CARGO_BIN_EXE_fake-runtime")
 }
 
@@ -50,7 +50,7 @@ pub fn sleep_forever_bin() -> &'static str {
 pub fn fake_runtime_spec(script: &[Directive]) -> Result<LaunchSpec, serde_json::Error> {
     let script_path = write_script_file(script)?;
     Ok(LaunchSpec {
-        program: PathBuf::from(fake_runtime_bin()),
+        program: PathBuf::from(fake_runtime_path()),
         args: vec![OsString::from("--patch"), script_path.into_os_string()],
         envs: HashMap::new(),
         cwd: None,
@@ -104,7 +104,7 @@ fn temp_home_dir() -> PathBuf {
 pub fn harness_config(script: &[Directive]) -> Result<Config, serde_json::Error> {
     let script_path = write_script_file(script)?;
     Ok(Config {
-        dsh_bin: Some(fake_runtime_bin().to_string()),
+        dsh_bin: Some(fake_runtime_path().to_string()),
         patches: vec![script_path],
         timeouts: test_timeouts(),
         dsh_home: Some(temp_home_dir()),

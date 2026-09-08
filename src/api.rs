@@ -359,9 +359,10 @@ pub enum Input {
 
 /// The result of one [`Session::run`], field-for-field the **Python** SDK's
 /// `RunResult` (upstream `python/sdk/src/deepseek_harness/api.py:40-46`):
-/// exactly the five Python fields, spec §6.2 — no `session_root`. (The
-/// TypeScript SDK's `RunResult` lacks `finish_reason`; Rust intentionally
-/// follows Python.)
+/// exactly the five Python fields of spec §6.2 — the v0.1 session-root
+/// path field is dropped, with no replacement (spec §5). The TypeScript
+/// SDK's `RunResult` lacks `finish_reason`; Rust intentionally follows
+/// Python.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunResult {
     /// The SDK session id this turn ran on.
@@ -471,9 +472,9 @@ mod tests {
     /// Compile-time spec §6.2 assertion: `RunResult` has exactly the five
     /// Python fields. Both the construction and the exhaustive destructure
     /// name every field — no `..`, no `_` — so a field added (including a
-    /// `session_root` resurrection), renamed, or removed fails the build.
-    /// This guards the field set only; it does not prove the absence of an
-    /// accessor method.
+    /// resurrection of the v0.1 session-root path), renamed, or removed
+    /// fails the build. This guards the field set only; it does not prove
+    /// the absence of an accessor method.
     #[test]
     fn run_result_has_exactly_the_five_python_fields() {
         let result = RunResult {
