@@ -4,7 +4,7 @@ Morning Star knowledge base: distilled implementation SSOT, reusable design deci
 
 | Document | Source Plan | Description | Status |
 |----------|-------------|-------------|--------|
-| [api-design/dsh-sdk-wire-protocol-parity.md](api-design/dsh-sdk-wire-protocol-parity.md) | iteration:v0.1 (01+02); re-verified 2026-09-08 | DSH wire-protocol source-verified facts, the three corrected traps (inserted[].id receipt, skip-malformed-lines, stderr tail), Python-parity RunResult decisions incl. documented divergences, plus the 2026-09-08 upstream re-verification (wire unchanged; launch/env contract replaced) | active |
+| [api-design/dsh-sdk-wire-protocol-parity.md](api-design/dsh-sdk-wire-protocol-parity.md) | iteration:v0.1 (01+02); re-verified 2026-09-08 | DSH wire-protocol source-verified facts, the three corrected traps (inserted[].id receipt, skip-malformed-lines, stderr tail), Python-parity RunResult decisions incl. documented divergences, plus the 2026-09-08 upstream re-verification (wire unchanged; launch/env contract replaced) | **stale — superseded 2026-09-08 by `.mstar/specs/dsh-runtime-launch-contract.md` + `.mstar/specs/dsh-sdk-wire-parity-surface.md` for the launch/env/config half (banner in the doc); wire facts still valid; refresh owned by `mstar-compound` at iteration-close** |
 | [best-practices/crates-io-github-release-pipeline.md](best-practices/crates-io-github-release-pipeline.md) | iteration:v0.2 (03) | crates.io release pipeline: Trusted Publishing contracts, PR-driven annotated tags, injection/label/error-text traps, fragment changelog determinism rules | active |
 
 - **Tracked**: yes — results are shared with the team across clones.

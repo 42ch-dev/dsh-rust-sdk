@@ -24,6 +24,8 @@ related_components:
 
 # DSH SDK wire protocol: source-verified facts and Python-parity decisions
 
+> **Supersession notice (2026-09-08, iteration `003-upstream-launch-contract`).** The launch/environment/config half of this document is **stale**: the "Env injection" bullet under *Python-parity decisions*, the 5-variant `ContentBlock` count under *Wire facts*, and the 6-field `RunResult` statement under *Python-parity decisions* describe the v0.1 surface, which upstream and this crate have since replaced. Authoritative now: `.mstar/specs/dsh-runtime-launch-contract.md` (launch grammar, `DSH_HOME`, child env, removal list, `Config` / `RunResult` field sets) and `.mstar/specs/dsh-sdk-wire-parity-surface.md` (wire surface, six-variant block vocabulary, `reasoningEffort`, bounded `initialize`, callback, divergences). The wire facts and the three traps below remain valid. Refresh of this document is `mstar-compound` work at iteration-close — not part of the Phase 1 chain.
+
 ## Context
 
 v0.1 built a Rust client for the DeepSeek Harness (DSH) SDK runtime: stdio line-framed JSON-RPC 2.0, spawned as a subprocess. The Python SDK (`python/sdk` in DSH) is the alignment baseline; the TypeScript SDK (`packages/sdk/client`) is the design twin. An advisor feasibility study plus an architect pass that read the DSH sources end-to-end produced a set of verified facts — three of which **contradicted the original plan text** and would each have shipped a broken client. This document is the cross-iteration SSOT for those facts so future iterations (runtime-bin delivery, protocol upgrades) never re-derive them from memory.
