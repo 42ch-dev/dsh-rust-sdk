@@ -345,10 +345,13 @@ impl HarnessClient {
     /// protocol declares the name wire-stable and has no version negotiation,
     /// so an unexpected identity is a hard protocol error.
     ///
-    /// `reasoning_effort` is sent verbatim as the wire key `reasoningEffort`
-    /// (spec §6.3); pass `None` when unset. The high-level path
-    /// ([`DeepSeekHarness::start`](crate::api::DeepSeekHarness::start))
-    /// normalizes [`Config::reasoning_effort`](crate::runtime::Config::reasoning_effort)
+    /// `reasoning_effort` is sent as the wire key `reasoningEffort`;
+    /// `None`, empty, and whitespace-only values are dropped by the wire
+    /// type itself ([`InitializeParams::reasoning_effort`], spec §6.3), so
+    /// this low-level path can never send a blank value. The high-level
+    /// path ([`DeepSeekHarness::start`](crate::api::DeepSeekHarness::start))
+    /// additionally normalizes
+    /// [`Config::reasoning_effort`](crate::runtime::Config::reasoning_effort)
     /// through `Config::reasoning_effort_for_wire`, which drops empty and
     /// whitespace-only values before they reach this call.
     pub async fn initialize(

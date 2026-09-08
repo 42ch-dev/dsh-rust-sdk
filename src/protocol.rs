@@ -105,10 +105,13 @@ pub struct InitializeParams {
     pub model: String,
     /// Optional reasoning-effort id inherited by SDK-created agents and
     /// their in-process descendants (upstream
-    /// `packages/sdk/protocol/src/types.ts:24`). Omitted from the wire when
-    /// `None` or blank (spec §6.3): the server rejects an empty string
-    /// (`packages/sdk/server/src/server.ts:136-138`).
-    #[serde(rename = "reasoningEffort", skip_serializing_if = "Option::is_none")]
+    /// `packages/sdk/protocol/src/types.ts:24`). Never sent as
+    /// `reasoningEffort` when `None`, empty, or whitespace-only (spec §6.3):
+    /// the wire type itself drops blank values on every serialization path,
+    /// because the server rejects an empty string
+    /// (`packages/sdk/server/src/server.ts:136-138`). A non-blank value is
+    /// serialized verbatim (untrimmed).
+    #[serde(rename = "reasoningEffort", skip_serializing_if = "is_none_or_blank")]
     pub reasoning_effort: Option<String>,
     /// Optional positive output-token cap inherited by SDK-created agents and
     /// their in-process descendants. Omitted from the wire when `None`.
@@ -425,6 +428,16 @@ fn default_error_message() -> String {
     "JSON-RPC error".to_string()
 }
 
+/// `skip_serializing_if` predicate for
+/// [`InitializeParams::reasoning_effort`]: omit the wire key when unset,
+/// empty, or whitespace-only (spec §6.3). Blank values are dropped at the
+/// wire type itself so no caller — including the low-level
+/// `HarnessClient::initialize` path — can ever serialize an empty
+/// `reasoningEffort`; a non-blank value passes through verbatim.
+fn is_none_or_blank(value: &Option<String>) -> bool {
+    value.as_deref().is_none_or(|v| v.trim().is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -514,6 +527,25 @@ mod tests {
             json!({"cwd":"/x","provider":"deepseek","model":"m","reasoningEffort":"high"}),
             "a set reasoningEffort must serialize under the wire key reasoningEffort (spec §6.3)"
         );
+    }
+
+    #[test]
+    fn initialize_params_omits_blank_reasoning_effort() {
+        for blank in ["", "   ", " \t "] {
+            let params = InitializeParams {
+                cwd: "/x".into(),
+                provider: "deepseek".into(),
+                model: "m".into(),
+                reasoning_effort: Some(blank.into()),
+                max_tokens: None,
+            };
+            let out = serde_json::to_value(&params).unwrap();
+            assert_eq!(
+                out,
+                json!({"cwd":"/x","provider":"deepseek","model":"m"}),
+                "a {blank:?} reasoningEffort must be dropped at the wire type, never sent (spec §6.3)"
+            );
+        }
     }
 
     #[test]
