@@ -240,6 +240,11 @@ impl Session<'_> {
     /// `packages/sdk/client/src/api.ts:150-156,186-200`,
     /// `python/sdk/src/deepseek_harness/api.py:124-131,139-144`).
     ///
+    /// The callback is invoked **before** the run's lag gate: a lagged
+    /// `recv()` can still return a retained notification, and that
+    /// delivered notification is observed even though the run then fails
+    /// fast with the lag error instead of trusting a truncated stream.
+    ///
     /// The bound is `Fn(&Notification) + Send + Sync`, not `FnMut`: a
     /// caller needing shared mutable state captures an `Arc<Mutex<..>>` by
     /// interior mutability, and [`Session::run`] keeps taking `&self` — the
@@ -275,10 +280,14 @@ impl Session<'_> {
         // wire order (spec §6.5).
         let receipt = loop {
             let notification = subscription.recv().await?;
-            ensure_no_lag(&mut subscription)?;
+            // The callback runs before the lag gate: a lagged `recv()` can
+            // still return a retained notification, and that delivered
+            // notification must be observed even though the run then fails
+            // fast on the truncated stream (spec §6.5 rule 1).
             if let Some(callback) = on_notification {
                 callback(&notification);
             }
+            ensure_no_lag(&mut subscription)?;
             let is_receipt = match notification.session_event() {
                 Some(Ok(event)) => {
                     event.session_id == *root && is_inbox_receipt(&event.event, &message_id)
@@ -374,10 +383,12 @@ impl Session<'_> {
                 break;
             }
             notification = subscription.recv().await?;
-            ensure_no_lag(&mut subscription)?;
+            // Same ordering as the receipt wait: the callback observes the
+            // delivered notification before the lag gate can fail the run.
             if let Some(callback) = on_notification {
                 callback(&notification);
             }
+            ensure_no_lag(&mut subscription)?;
         }
 
         let finish_reason = extract_finish_reason(&events)?;
