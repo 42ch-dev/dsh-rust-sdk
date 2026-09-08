@@ -18,7 +18,7 @@ use serde_json::{Map, Value};
 
 /// A content block in a user prompt or assistant message, tagged by `type`.
 ///
-/// The known variants (`text`, `reasoning`, `image`, `tool-call`,
+/// The known variants (`text`, `reasoning`, `image`, `file`, `tool-call`,
 /// `tool-result`) are typed; any other `type` tag deserializes into
 /// [`ContentBlock::Unknown`], preserving the raw JSON object verbatim. This
 /// keeps the type merge-extensible, mirroring the DSH `ContentBlockMap` (see
@@ -42,6 +42,10 @@ pub enum ContentBlock {
     /// A durable raster image reference.
     #[serde(rename = "image")]
     Image { attachment: ImageAttachmentRef },
+    /// A durable verbatim file reference, valid in user content (upstream
+    /// `packages/llm/llm/src/types.ts:84-87`).
+    #[serde(rename = "file")]
+    File { attachment: FileAttachmentRef },
     /// A tool invocation requested by the model.
     #[serde(rename = "tool-call")]
     ToolCall {
@@ -92,6 +96,39 @@ pub struct ImageAttachmentRef {
     /// Optional display name stripped of local path information.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Input dimensions after applying EXIF orientation and before
+    /// normalization scaling; present only when normalization reduced the
+    /// image (upstream `packages/attachment/attachment/src/types.ts:24-31`).
+    /// Omitted from the wire when `None`.
+    #[serde(rename = "originalDimensions", skip_serializing_if = "Option::is_none")]
+    pub original_dimensions: Option<Dimensions>,
+}
+
+/// Intrinsic pixel dimensions of an image (mirrors the inline
+/// `originalDimensions` shape in DSH `ImageAttachmentRef`,
+/// `packages/attachment/attachment/src/types.ts:28-31`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Dimensions {
+    /// Intrinsic encoded width in pixels.
+    pub width: u32,
+    /// Intrinsic encoded height in pixels.
+    pub height: u32,
+}
+
+/// Durable, serializable reference to one verbatim stored file. Files are
+/// stored byte-for-byte with no normalization; `attachment_id` is the sha256
+/// digest of exactly those bytes (mirrors DSH `FileAttachmentRef`,
+/// `packages/attachment/attachment/src/types.ts:39-46`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FileAttachmentRef {
+    /// Opaque content-addressed storage identifier; never a filesystem path
+    /// or bearer URL.
+    #[serde(rename = "attachmentId")]
+    pub attachment_id: String,
+    /// Sanitized display filename, also the stored object's leaf name.
+    pub name: String,
+    /// Exact byte length.
+    pub bytes: u64,
 }
 
 /// Parameters for the process-wide SDK handshake (`initialize`).
@@ -640,6 +677,71 @@ mod tests {
             }
             other => panic!("expected ToolCall, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn content_block_file_variant_round_trip() {
+        // A `file` block deserializes into the typed variant (spec §5.1).
+        let block: ContentBlock = serde_json::from_value(json!({
+            "type":"file",
+            "attachment":{"attachmentId":"att-f1","name":"report.pdf","bytes":4096}
+        }))
+        .unwrap();
+        match &block {
+            ContentBlock::File { attachment } => {
+                assert_eq!(attachment.attachment_id, "att-f1");
+                assert_eq!(attachment.name, "report.pdf");
+                assert_eq!(attachment.bytes, 4096);
+            }
+            other => panic!("expected File, got {other:?}"),
+        }
+        assert_round_trip(
+            &block,
+            r#"{"type":"file","attachment":{"attachmentId":"att-f1","name":"report.pdf","bytes":4096}}"#,
+        );
+    }
+
+    #[test]
+    fn content_block_image_original_dimensions_round_trip() {
+        // An image block carrying `originalDimensions` round-trips parse ->
+        // serialize without loss (spec §5.1; Track B F-4).
+        let block: ContentBlock = serde_json::from_value(json!({
+            "type":"image","attachment":{
+                "attachmentId":"att-1","mediaType":"image/png","bytes":123,
+                "width":10,"height":20,"name":"pic.png",
+                "originalDimensions":{"width":4000,"height":3000}
+            }
+        }))
+        .unwrap();
+        match &block {
+            ContentBlock::Image { attachment } => {
+                assert_eq!(
+                    attachment.original_dimensions,
+                    Some(Dimensions {
+                        width: 4000,
+                        height: 3000
+                    })
+                );
+            }
+            other => panic!("expected Image, got {other:?}"),
+        }
+        assert_round_trip(
+            &block,
+            r#"{"type":"image","attachment":{"attachmentId":"att-1","mediaType":"image/png","bytes":123,"width":10,"height":20,"name":"pic.png","originalDimensions":{"width":4000,"height":3000}}}"#,
+        );
+        // Absent originalDimensions stays absent on the wire.
+        let plain: ContentBlock = serde_json::from_value(json!({
+            "type":"image","attachment":{
+                "attachmentId":"att-1","mediaType":"image/png","bytes":123,
+                "width":10,"height":20
+            }
+        }))
+        .unwrap();
+        let out = serde_json::to_value(&plain).unwrap();
+        assert!(!out["attachment"]
+            .as_object()
+            .unwrap()
+            .contains_key("originalDimensions"));
     }
 
     #[test]
