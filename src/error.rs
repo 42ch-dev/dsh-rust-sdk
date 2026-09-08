@@ -1,4 +1,31 @@
 use serde_json::Value;
+use std::fmt;
+
+/// The selected DSH profile for a wedged handshake, rendered in the
+/// timeout message Python-style (`selected dsh profile 'sdk'`) when known
+/// (spec §7; Python appends `{profile!r}` —
+/// `python/sdk/src/deepseek_harness/client.py:158-160`).
+///
+/// A newtype so the thiserror format string can render the parenthetical
+/// suffix conditionally — `Option<String>` has no `Display`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SelectedProfile(Option<String>);
+
+impl SelectedProfile {
+    /// The profile selected for the launch.
+    pub fn new(profile: impl Into<String>) -> Self {
+        Self(Some(profile.into()))
+    }
+}
+
+impl fmt::Display for SelectedProfile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            Some(profile) => write!(f, " (selected dsh profile '{profile}')"),
+            None => Ok(()),
+        }
+    }
+}
 
 /// Typed error taxonomy for the DeepSeek Harness SDK.
 ///
@@ -14,10 +41,15 @@ pub enum Error {
     TransportClosed(String),
 
     /// A request did not get a response within the configured timeout.
-    #[error("{method} timed out waiting for DeepSeek Harness runtime: {source}")]
+    #[error("{method} timed out waiting for DeepSeek Harness runtime: {source}{profile}")]
     RequestTimeout {
         /// The JSON-RPC method that timed out.
         method: String,
+        /// The selected DSH profile, named so a wedged handshake is
+        /// diagnosable (spec §7; Python appends
+        /// `selected dsh profile {profile!r}`). Empty for requests whose
+        /// timeout path has no profile context.
+        profile: SelectedProfile,
         /// The underlying timeout error.
         #[source]
         source: tokio::time::error::Elapsed,
@@ -74,7 +106,7 @@ impl Error {
 
 #[cfg(test)]
 mod tests {
-    use super::Error;
+    use super::{Error, SelectedProfile};
     use serde_json::{json, Value};
     use std::time::Duration;
 
@@ -99,11 +131,26 @@ mod tests {
     async fn display_request_timeout() {
         let err = Error::RequestTimeout {
             method: "initialize".into(),
+            profile: SelectedProfile::default(),
             source: elapsed().await,
         };
         assert_eq!(
             err.to_string(),
             "initialize timed out waiting for DeepSeek Harness runtime: deadline has elapsed"
+        );
+    }
+
+    #[tokio::test]
+    async fn display_request_timeout_names_profile() {
+        let err = Error::RequestTimeout {
+            method: "initialize".into(),
+            profile: SelectedProfile::new("sdk"),
+            source: elapsed().await,
+        };
+        assert_eq!(
+            err.to_string(),
+            "initialize timed out waiting for DeepSeek Harness runtime: deadline has elapsed \
+             (selected dsh profile 'sdk')"
         );
     }
 
@@ -173,6 +220,7 @@ mod tests {
         assert!(!Error::TransportClosed("x".into()).is_protocol());
         assert!(!Error::RequestTimeout {
             method: "m".into(),
+            profile: SelectedProfile::default(),
             source: elapsed().await,
         }
         .is_protocol());

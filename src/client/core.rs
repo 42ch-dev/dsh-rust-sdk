@@ -14,7 +14,7 @@ use tokio::sync::{broadcast, oneshot, Notify};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::error::Error;
+use crate::error::{Error, SelectedProfile};
 use crate::protocol::{
     ContentBlock, InitializeParams, InitializeResult, Notification, SessionPromptParams,
     SessionPromptResult,
@@ -63,6 +63,15 @@ pub struct LaunchSpec {
 /// gives the runtime time to flush durable state after stdin closes.
 #[derive(Debug, Clone, Copy)]
 pub struct ClientTimeouts {
+    /// Bound for the `initialize` handshake request only (spec §6.4).
+    /// `None` waits indefinitely. The activity interval and
+    /// `session/prompt` keep using [`ClientTimeouts::request_timeout`]
+    /// (Python parity: `initialize_timeout_seconds` vs
+    /// `request_timeout_seconds`). The high-level
+    /// [`Config::initialize_timeout`](crate::runtime::Config::initialize_timeout)
+    /// carries the Python-parity 30 s default and is copied here by
+    /// [`DeepSeekHarness::start`](crate::api::DeepSeekHarness::start).
+    pub initialize_timeout: Option<Duration>,
     /// Per-request response deadline. `None` waits indefinitely (the Python
     /// SDK default). There is no wire-level cancellation: on timeout the
     /// client abandons the wait and removes the pending entry, while the
@@ -81,6 +90,7 @@ pub struct ClientTimeouts {
 impl Default for ClientTimeouts {
     fn default() -> Self {
         Self {
+            initialize_timeout: None,
             request_timeout: None,
             shutdown_timeout: Duration::from_secs(1),
             eof_grace: Duration::from_secs(6),
@@ -246,6 +256,27 @@ impl HarnessClient {
     /// unknown ids are dropped. When the runtime is already dead (or spawn
     /// failed), fails fast with the exit code and captured stderr tail.
     pub async fn request(&self, method: &str, params: Option<Value>) -> Result<Value, Error> {
+        self.request_with_timeout(
+            method,
+            params,
+            self.timeouts.request_timeout,
+            SelectedProfile::default(),
+        )
+        .await
+    }
+
+    /// [`HarnessClient::request`] with an explicit response deadline and
+    /// timeout-diagnostic profile, so the `initialize` handshake can apply
+    /// its own bound ([`ClientTimeouts::initialize_timeout`], spec §6.4)
+    /// while every other request keeps the generic
+    /// [`ClientTimeouts::request_timeout`].
+    async fn request_with_timeout(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        timeout: Option<Duration>,
+        profile: SelectedProfile,
+    ) -> Result<Value, Error> {
         // Fast-fail on a closed or dead runtime, with process context.
         {
             let st = lock(&self.state);
@@ -311,7 +342,7 @@ impl HarnessClient {
             }
         }
 
-        let outcome = match self.timeouts.request_timeout {
+        let outcome = match timeout {
             Some(duration) => match tokio::time::timeout(duration, rx).await {
                 Ok(result) => result,
                 Err(elapsed) => {
@@ -320,6 +351,7 @@ impl HarnessClient {
                     lock(&self.pending).remove(&id);
                     return Err(Error::RequestTimeout {
                         method: method.to_string(),
+                        profile,
                         source: elapsed,
                     });
                 }
@@ -354,6 +386,12 @@ impl HarnessClient {
     /// [`Config::reasoning_effort`](crate::runtime::Config::reasoning_effort)
     /// through `Config::reasoning_effort_for_wire`, which drops empty and
     /// whitespace-only values before they reach this call.
+    ///
+    /// The handshake is bounded by [`ClientTimeouts::initialize_timeout`]
+    /// (spec §6.4) — the bound applies to the handshake only, never to
+    /// `session/prompt` or the activity interval, which keep using
+    /// [`ClientTimeouts::request_timeout`]. On expiry the error is
+    /// [`Error::RequestTimeout`] naming `profile` (spec §7).
     pub async fn initialize(
         &mut self,
         cwd: impl Into<String>,
@@ -361,6 +399,7 @@ impl HarnessClient {
         model: impl Into<String>,
         reasoning_effort: Option<&str>,
         max_tokens: Option<u32>,
+        profile: &str,
     ) -> Result<InitializeResult, Error> {
         if max_tokens == Some(0) {
             return Err(Error::SdkProtocol {
@@ -375,7 +414,12 @@ impl HarnessClient {
             max_tokens,
         };
         let result = self
-            .request("initialize", Some(serde_json::to_value(params)?))
+            .request_with_timeout(
+                "initialize",
+                Some(serde_json::to_value(params)?),
+                self.timeouts.initialize_timeout,
+                SelectedProfile::new(profile),
+            )
             .await?;
         let init: InitializeResult =
             serde_json::from_value(result).map_err(|err| Error::SdkProtocol {

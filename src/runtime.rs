@@ -115,8 +115,11 @@ pub struct Config {
     pub env: Option<HashMap<String, String>>,
     /// `initialize` handshake deadline (Python
     /// `initialize_timeout_seconds: float = 30.0`,
-    /// `python/sdk/src/deepseek_harness/api.py:33`). Surface only in this
-    /// plan; the handshake bound lands with plan 06.
+    /// `python/sdk/src/deepseek_harness/api.py:33`). `None` means unbounded
+    /// — a deliberate opt-out, not a legacy default (spec §6.4). The bound
+    /// applies to the handshake only, never to the activity interval or
+    /// `session/prompt`; [`DeepSeekHarness::start`](crate::api::DeepSeekHarness::start)
+    /// copies it into [`ClientTimeouts::initialize_timeout`].
     pub initialize_timeout: Option<Duration>,
     /// Per-request response deadline; `None` waits indefinitely (Python
     /// default).

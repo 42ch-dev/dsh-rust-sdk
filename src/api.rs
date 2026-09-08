@@ -69,8 +69,10 @@ impl DeepSeekHarness {
     /// observable through [`Config::resolve_dsh_home`] (spec §3.2.4) and
     /// the instance accessor [`DeepSeekHarness::dsh_home`].
     ///
-    /// [`Config::request_timeout`] bounds every request, including
-    /// `session/prompt`; `None` (the default) waits indefinitely.
+    /// [`Config::initialize_timeout`] bounds the `initialize` handshake
+    /// only (spec §6.4); [`Config::request_timeout`] bounds every other
+    /// request, including `session/prompt`; `None` (the default) waits
+    /// indefinitely.
     ///
     /// On `initialize` failure the close ladder is run before the error
     /// propagates, so the spawned child is never leaked (Python parity).
@@ -97,11 +99,13 @@ impl DeepSeekHarness {
                 .collect(),
             cwd: Some(config.runtime_cwd.clone().unwrap_or_else(|| cwd.clone())),
         };
-        // `Config::request_timeout` is the Python-parity request deadline
-        // (`None` = wait indefinitely); `Config::timeouts` supplies the
-        // close-ladder timings.
+        // `Config::initialize_timeout` bounds the handshake only (spec
+        // §6.4); `Config::request_timeout` is the Python-parity request
+        // deadline (`None` = wait indefinitely); `Config::timeouts`
+        // supplies the close-ladder timings.
         let mut timeouts = config.timeouts;
         timeouts.request_timeout = config.request_timeout;
+        timeouts.initialize_timeout = config.initialize_timeout;
         let mut client = HarnessClient::spawn(spec, timeouts)?;
         if let Err(err) = client
             .initialize(
@@ -110,6 +114,7 @@ impl DeepSeekHarness {
                 &config.model,
                 config.reasoning_effort_for_wire(),
                 config.max_tokens,
+                &config.profile,
             )
             .await
         {

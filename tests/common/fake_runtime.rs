@@ -25,6 +25,7 @@ use serde_json::json;
 /// request-timeout scenario needs only a short `request_timeout` override.
 pub fn test_timeouts() -> ClientTimeouts {
     ClientTimeouts {
+        initialize_timeout: None,
         request_timeout: None,
         shutdown_timeout: Duration::from_millis(200),
         eof_grace: Duration::from_millis(300),
