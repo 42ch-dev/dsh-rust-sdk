@@ -46,6 +46,10 @@ fn main() {
                     eprintln!("fake-runtime: --patch needs a path");
                     std::process::exit(2);
                 };
+                if script_path.is_some() {
+                    eprintln!("fake-runtime: repeated --patch is not supported");
+                    std::process::exit(2);
+                }
                 script_path = Some(path);
             }
             other => {

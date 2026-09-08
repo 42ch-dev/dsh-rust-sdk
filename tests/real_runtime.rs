@@ -14,6 +14,8 @@ use std::time::Duration;
 
 use deepseek_harness_sdk::{Config, DeepSeekHarness, Input};
 
+mod common;
+
 /// One smoke turn: start a harness with a temp `dsh_home` and default
 /// config, run `Session::run`, and assert **structural** facts only (LLM
 /// output is nondeterministic): a success-class `finish_reason`
@@ -46,8 +48,10 @@ async fn real_runtime_smoke() {
     };
 
     // A unique temp harness home so repeated runs never reuse stale session
-    // state (process id + monotonic nanos; no extra dependency needed).
-    let dsh_home = std::env::temp_dir().join(format!(
+    // state (process id + monotonic nanos; no extra dependency needed),
+    // under the per-run test temp root so the suite's artifacts stay
+    // consolidated and bounded (F6).
+    let dsh_home = common::fake_runtime::test_temp_root().join(format!(
         "dsh-sdk-real-runtime-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()

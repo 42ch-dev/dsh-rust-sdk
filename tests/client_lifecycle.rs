@@ -7,18 +7,21 @@
 
 mod common;
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use deepseek_harness_sdk::{
-    ClientTimeouts, ContentBlock, DeepSeekHarness, Error, HarnessClient, LaunchSpec,
+    ClientTimeouts, Config, ContentBlock, DeepSeekHarness, Error, HarnessClient, LaunchSpec,
 };
 use serde_json::{json, Value};
+use uuid::Uuid;
 
 use common::fake_runtime::{
-    emit, emit_blank, emit_raw, emit_stderr, exit, expect, expect_frame, expect_params,
-    fake_runtime_spec, harness_config, ignore_all, respond, respond_error, server_info_result,
-    sleep_forever_bin, sleep_ms, test_timeouts, FakeRuntime,
+    emit, emit_blank, emit_raw, emit_stderr, env_dump_bin, exit, expect, expect_frame,
+    expect_params, fake_runtime_path, fake_runtime_spec, harness_config, ignore_all, respond,
+    respond_error, server_info_result, sleep_forever_bin, sleep_ms, test_temp_root, test_timeouts,
+    FakeRuntime,
 };
 
 /// The canonical client-side session ids used across scenarios.
@@ -474,7 +477,9 @@ async fn close_ladder_escalates_to_sigterm_when_peer_ignores_shutdown_and_eof() 
 async fn spawn_failures_map_to_typed_errors() {
     let timeouts = test_timeouts();
 
-    // Missing program: ENOENT -> RuntimeNotFound.
+    // Missing program: ENOENT -> Io. A spawn failure is an I/O error
+    // (spec §7); `Error::RuntimeNotFound` is reserved for "no runtime could
+    // be resolved" (spec §8), which `resolve_runtime` reports before spawn.
     let spec = LaunchSpec {
         program: PathBuf::from("/definitely/not/a/deepseek/runtime"),
         args: vec![],
@@ -482,10 +487,7 @@ async fn spawn_failures_map_to_typed_errors() {
         cwd: None,
     };
     let err = HarnessClient::spawn(spec, timeouts).expect_err("missing program must fail");
-    assert!(
-        matches!(err, Error::RuntimeNotFound(_)),
-        "unexpected error: {err}"
-    );
+    assert!(matches!(err, Error::Io(_)), "unexpected error: {err}");
 
     // A program that exists but cannot be launched (a directory is not
     // executable) is a plain spawn I/O error, not a NotFound.
@@ -553,5 +555,99 @@ async fn start_creates_missing_configured_home_before_launch() {
         home.is_dir(),
         "the resolved home must be created before the child is launched"
     );
+    assert_eq!(
+        harness.dsh_home(),
+        home.as_path(),
+        "the instance accessor must expose the resolved home the harness created and injected"
+    );
     harness.close().await.expect("clean close");
+}
+
+#[tokio::test]
+async fn spawn_strips_forbidden_keys_from_inherited_parent_env() {
+    // Spec §4.2 / AC1: the child env carries no DSH_CORDIS_CONFIG /
+    // DSH_SESSION_ROOT / DSH_CWD under any configuration. The override set
+    // filters them from Config::env, and the spawn layer strips them from
+    // the inherited parent env — so even a parent that still exports the
+    // v0.1 keys cannot leak them into the runtime child.
+    let output = test_temp_root().join(format!("env-dump-{}.txt", Uuid::new_v4()));
+    // The three keys are never read by the crate, so mutating the process
+    // env here cannot affect sibling tests; the guard restores it on drop.
+    let _guard = ForbiddenEnvGuard;
+    std::env::set_var("DSH_CORDIS_CONFIG", "/parent/cordis.yml");
+    std::env::set_var("DSH_SESSION_ROOT", "/parent/sessions");
+    std::env::set_var("DSH_CWD", "/parent/cwd");
+    let spec = LaunchSpec {
+        program: PathBuf::from(env_dump_bin()),
+        args: vec![
+            OsString::from(&output),
+            OsString::from("DSH_CORDIS_CONFIG"),
+            OsString::from("DSH_SESSION_ROOT"),
+            OsString::from("DSH_CWD"),
+            OsString::from("PATH"),
+        ],
+        envs: Default::default(),
+        cwd: None,
+    };
+    let mut client = HarnessClient::spawn(spec, test_timeouts()).expect("spawn env-dump");
+    // The fixture writes the dump synchronously at startup; poll for it.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !output.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the env dump never appeared"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let dump = std::fs::read_to_string(&output).expect("read the env dump");
+    for forbidden in ["DSH_CORDIS_CONFIG", "DSH_SESSION_ROOT", "DSH_CWD"] {
+        assert!(
+            !dump
+                .lines()
+                .any(|line| line.starts_with(&format!("{forbidden}="))),
+            "{forbidden} must be stripped from the child env: {dump}"
+        );
+    }
+    assert!(
+        dump.lines().any(|line| line.starts_with("PATH=")),
+        "the ordinary parent env must still be inherited (no env_clear): {dump}"
+    );
+    client.close().await.expect("clean close");
+}
+
+#[tokio::test]
+async fn home_creation_failure_surfaces_as_io_before_spawn() {
+    // Spec §3.2.5: a create_dir_all failure surfaces as Error::Io before
+    // the child is spawned (no child leak). Point dsh_home at a path under
+    // a regular file so mkdir fails with NotADirectory — a kind only the
+    // home-creation step can produce (a spawn failure would be NotFound or
+    // PermissionDenied), pinning that the error precedes HarnessClient::spawn.
+    let blocker = test_temp_root().join(format!("home-blocker-{}", Uuid::new_v4()));
+    std::fs::write(&blocker, "").expect("create the blocker file");
+    let config = Config {
+        dsh_bin: Some(fake_runtime_path().to_string()),
+        dsh_home: Some(blocker.join("home")),
+        timeouts: test_timeouts(),
+        ..Config::default()
+    };
+    let err = DeepSeekHarness::start(config)
+        .await
+        .expect_err("home creation under a regular file must fail");
+    assert!(
+        matches!(&err, Error::Io(io) if io.kind() == std::io::ErrorKind::NotADirectory),
+        "expected Error::Io(NotADirectory) from create_dir_all before spawn, got: {err}"
+    );
+}
+
+/// Restores the parent env after the forbidden-key spawn test. The three
+/// keys are never read by the crate, so leaving them set would be benign,
+/// but the test restores them anyway to keep the process env pristine.
+struct ForbiddenEnvGuard;
+
+impl Drop for ForbiddenEnvGuard {
+    fn drop(&mut self) {
+        for key in ["DSH_CORDIS_CONFIG", "DSH_SESSION_ROOT", "DSH_CWD"] {
+            std::env::remove_var(key);
+        }
+    }
 }

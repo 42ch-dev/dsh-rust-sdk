@@ -8,7 +8,8 @@
 
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use deepseek_harness_sdk::{ClientTimeouts, Config, Error, HarnessClient, LaunchSpec};
@@ -42,6 +43,26 @@ pub fn sleep_forever_bin() -> &'static str {
     env!("CARGO_BIN_EXE_sleep-forever")
 }
 
+/// Absolute path to the `env-dump` fixture binary.
+pub fn env_dump_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_env-dump")
+}
+
+/// One per-process temp root for the whole integration suite, so test
+/// artifacts (scenario files, harness homes, env dumps) accumulate in a
+/// single directory instead of one unique directory per allocation. A
+/// stale root from a previous run is removed best-effort on first use, so
+/// the system temp dir never holds more than one run's artifacts (F6).
+pub fn test_temp_root() -> &'static Path {
+    static ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
+        let root = std::env::temp_dir().join(format!("dsh-sdk-tests-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create the test temp root");
+        root
+    });
+    &ROOT
+}
+
 /// A [`LaunchSpec`] running the fake-runtime peer against `script`.
 ///
 /// The scenario is written to a unique temp file and passed via
@@ -68,7 +89,7 @@ pub fn fake_runtime_spec(script: &[Directive]) -> Result<LaunchSpec, serde_json:
 /// uniformly.
 fn write_script_file(script: &[Directive]) -> Result<PathBuf, serde_json::Error> {
     let script = serde_json::to_string(script)?;
-    let path = std::env::temp_dir().join(format!("dsh-fake-runtime-{}.json", Uuid::new_v4()));
+    let path = test_temp_root().join(format!("dsh-fake-runtime-{}.json", Uuid::new_v4()));
     std::fs::write(&path, script).map_err(serde_json::Error::io)?;
     Ok(path)
 }
@@ -89,9 +110,10 @@ impl FakeRuntime {
 
 /// A unique temp directory for the harness home, so the fake-runtime suite
 /// never touches a real `~/.dsh`: `DeepSeekHarness::start` creates the
-/// resolved home at boot (spec §3.2.5).
+/// resolved home at boot (spec §3.2.5). Lives under the per-run temp root
+/// (F6).
 fn temp_home_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("dsh-sdk-test-home-{}", Uuid::new_v4()))
+    test_temp_root().join(format!("dsh-sdk-test-home-{}", Uuid::new_v4()))
 }
 
 /// A [`Config`] for `DeepSeekHarness::start` that launches the fake-runtime
