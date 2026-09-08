@@ -19,9 +19,10 @@
 //! is rejected locally before spawn.
 //!
 //! [`compose_env`] builds the override set injected into the runtime
-//! subprocess: the resolved `DSH_HOME` (non-empty `$DSH_HOME` from
-//! `Config::env`, then the parent environment, else `~/.dsh` — upstream
-//! `resolveDshHome`, `packages/util/home-paths/src/index.ts:87-91`), the
+//! subprocess: the resolved `DSH_HOME` (`Config::dsh_home` → non-empty
+//! `$DSH_HOME` from `Config::env`, then the parent environment, else
+//! `~/.dsh` — upstream `resolveDshHome`,
+//! `packages/util/home-paths/src/index.ts:87-91`), the
 //! caller's `Config::env` entries (verbatim, except that the three
 //! forbidden keys of spec §4.2 are filtered out under any configuration),
 //! and `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` when configured. The
@@ -37,7 +38,7 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::client::ClientTimeouts;
@@ -67,12 +68,16 @@ have, or build the official runtime from the deepseek-harness repository \
 /// `{:?}` of the config never leaks the live API key.
 #[derive(Clone)]
 pub struct Config {
-    /// Provider name sent to the runtime on `initialize`
-    /// (Python default `"deepseek-official"`).
+    /// Provider name sent to the runtime on `initialize` (Python default
+    /// `"deepseek-official"`, `python/sdk/src/deepseek_harness/api.py:21`).
     pub provider: String,
-    /// Model name sent to the runtime on `initialize`
-    /// (Python default `"deepseek-v4-flash"`).
+    /// Model name sent to the runtime on `initialize` (Python default
+    /// `"deepseek-v4-flash"`, `python/sdk/src/deepseek_harness/api.py:22`).
     pub model: String,
+    /// Optional `reasoningEffort` for `initialize` (Python
+    /// `python/sdk/src/deepseek_harness/api.py:24`). Surface only in this
+    /// plan; the wire rule lands with plan 06.
+    pub reasoning_effort: Option<String>,
     /// Optional `maxTokens` for `initialize` (rejected when `0`).
     pub max_tokens: Option<u32>,
     /// Working directory for the agent; defaults to the current directory,
@@ -92,27 +97,28 @@ pub struct Config {
     /// entry in caller order and resolved absolute before spawn (Python
     /// `python/sdk/src/deepseek_harness/api.py:31`).
     pub patches: Vec<PathBuf>,
-    /// Complete launch argv (program + arguments) replacing the resolved
-    /// binary verbatim; an empty list counts as unset (Python truthiness).
-    pub launch_args_override: Option<Vec<String>>,
-    /// Explicit path for `DSH_CORDIS_CONFIG`; an empty string counts as
-    /// absent (Python truthiness) and falls back to the bundled default.
-    pub cordis_config: Option<String>,
-    /// Overrides the inherited `DEEPSEEK_BASE_URL`.
-    pub base_url: Option<String>,
-    /// Overrides the inherited `DEEPSEEK_API_KEY`.
-    pub api_key: Option<String>,
-    /// Session root directory, injected as `DSH_SESSION_ROOT`.
-    pub session_root: Option<String>,
+    /// Explicit harness home; resolution precedence in
+    /// [`Config::resolve_dsh_home`] (Python `dsh_home`,
+    /// `python/sdk/src/deepseek_harness/api.py:32`; spec §3).
+    pub dsh_home: Option<PathBuf>,
     /// Extra environment entries layered over the parent environment; the
     /// caller's entries win over the crate-injected `DSH_HOME` on collision
     /// (Python `env.update(self.config.env)` ordering).
     pub env: Option<HashMap<String, String>>,
+    /// `initialize` handshake deadline (Python
+    /// `initialize_timeout_seconds: float = 30.0`,
+    /// `python/sdk/src/deepseek_harness/api.py:33`). Surface only in this
+    /// plan; the handshake bound lands with plan 06.
+    pub initialize_timeout: Option<Duration>,
     /// Per-request response deadline; `None` waits indefinitely (Python
     /// default).
     pub request_timeout: Option<Duration>,
     /// Close-ladder timeouts via plan 01 [`ClientTimeouts`].
     pub timeouts: ClientTimeouts,
+    /// Overrides the inherited `DEEPSEEK_BASE_URL`.
+    pub base_url: Option<String>,
+    /// Overrides the inherited `DEEPSEEK_API_KEY`.
+    pub api_key: Option<String>,
 }
 
 impl fmt::Debug for Config {
@@ -120,17 +126,14 @@ impl fmt::Debug for Config {
         f.debug_struct("Config")
             .field("provider", &self.provider)
             .field("model", &self.model)
+            .field("reasoning_effort", &self.reasoning_effort)
             .field("max_tokens", &self.max_tokens)
             .field("cwd", &self.cwd)
             .field("runtime_cwd", &self.runtime_cwd)
             .field("dsh_bin", &self.dsh_bin)
             .field("profile", &self.profile)
             .field("patches", &self.patches)
-            .field("launch_args_override", &self.launch_args_override)
-            .field("cordis_config", &self.cordis_config)
-            .field("base_url", &self.base_url)
-            .field("api_key", &self.api_key.as_deref().map(|_| "<redacted>"))
-            .field("session_root", &self.session_root)
+            .field("dsh_home", &self.dsh_home)
             .field(
                 "env",
                 &self.env.as_ref().map(|env| {
@@ -149,8 +152,11 @@ impl fmt::Debug for Config {
                         .collect::<Vec<(&str, &str)>>()
                 }),
             )
+            .field("initialize_timeout", &self.initialize_timeout)
             .field("request_timeout", &self.request_timeout)
             .field("timeouts", &self.timeouts)
+            .field("base_url", &self.base_url)
+            .field("api_key", &self.api_key.as_deref().map(|_| "<redacted>"))
             .finish()
     }
 }
@@ -160,20 +166,20 @@ impl Default for Config {
         Self {
             provider: "deepseek-official".into(),
             model: "deepseek-v4-flash".into(),
+            reasoning_effort: None,
             max_tokens: None,
             cwd: None,
             runtime_cwd: None,
             dsh_bin: None,
             profile: "sdk".into(),
             patches: Vec::new(),
-            launch_args_override: None,
-            cordis_config: None,
-            base_url: None,
-            api_key: None,
-            session_root: None,
+            dsh_home: None,
             env: None,
+            initialize_timeout: Some(Duration::from_secs(30)),
             request_timeout: None,
             timeouts: ClientTimeouts::default(),
+            base_url: None,
+            api_key: None,
         }
     }
 }
@@ -291,7 +297,12 @@ fn compose_env_with(
 ) -> Result<Vec<(String, String)>, Error> {
     // The resolved home is injected first so the caller's Config::env wins
     // on collision (later entry wins at spawn).
-    let mut envs = vec![("DSH_HOME".to_string(), resolve_dsh_home(config, &lookup))];
+    let mut envs = vec![(
+        "DSH_HOME".to_string(),
+        resolve_dsh_home_with(config, &lookup)
+            .to_string_lossy()
+            .into_owned(),
+    )];
     if let Some(extra) = &config.env {
         envs.extend(
             extra
@@ -312,30 +323,84 @@ fn compose_env_with(
     Ok(envs)
 }
 
-/// Resolve the harness home: a non-empty `$DSH_HOME` (first from
-/// `Config::env`, then the parent environment), else `~/.dsh` (upstream
-/// `resolveDshHome`, `packages/util/home-paths/src/index.ts:87-91`).
-/// Blank/whitespace-only counts as unset, exactly as upstream does
-/// (`packages/util/home-paths/src/index.ts:88-89`).
-///
-/// The `Config::dsh_home` first rule, absolute/`~` normalization, directory
-/// creation, and the public accessor land with the resolution helper in the
-/// Config surface task (spec §3.2).
-fn resolve_dsh_home(config: &Config, lookup: &impl Fn(&str) -> Option<String>) -> String {
-    config
+impl Config {
+    /// Resolve the harness home (spec §3.1/§3.2), highest precedence first:
+    ///
+    /// 1. [`Config::dsh_home`] (an explicit configured path);
+    /// 2. a non-empty `DSH_HOME` — first from [`Config::env`], then from the
+    ///    injected `parent_env` (the parent process environment);
+    /// 3. `~/.dsh`.
+    ///
+    /// Blank/whitespace-only `DSH_HOME` counts as **unset**, exactly as
+    /// upstream does (`packages/util/home-paths/src/index.ts:88-89`). The
+    /// result is normalized to an absolute path with `~` expanded (upstream
+    /// `resolve(expandHomePath(selected))`,
+    /// `packages/util/home-paths/src/index.ts:87-91`).
+    ///
+    /// Pure: no filesystem side effects, so the resolution matrix is
+    /// testable with an injected `parent_env` map without touching a real
+    /// home (spec §9.2). The caller observes the selected home through this
+    /// accessor (spec §3.2.4); directory creation happens at boot (spec
+    /// §3.2.5).
+    pub fn resolve_dsh_home(&self, parent_env: &HashMap<String, String>) -> PathBuf {
+        resolve_dsh_home_with(self, &|name| parent_env.get(name).cloned())
+    }
+}
+
+/// `Config::resolve_dsh_home` with an injectable parent-environment lookup
+/// (a test seam; see [`resolve_runtime_with`]).
+fn resolve_dsh_home_with(config: &Config, lookup: &impl Fn(&str) -> Option<String>) -> PathBuf {
+    // 1. an explicit configured path (upstream `configured ?? ...`).
+    if let Some(home) = &config.dsh_home {
+        return normalize_home(home);
+    }
+    // 2. a non-empty $DSH_HOME — first from Config::env, then the parent
+    //    environment; blank/whitespace-only counts as unset (upstream
+    //    `fromEnv !== undefined && fromEnv.trim().length > 0 ? fromEnv :
+    //    defaultDshHome()`, `packages/util/home-paths/src/index.ts:88-89`).
+    let from_env = config
         .env
         .as_ref()
         .and_then(|extra| extra.get("DSH_HOME"))
         .filter(|value| !value.trim().is_empty())
         .cloned()
-        .or_else(|| lookup("DSH_HOME").filter(|value| !value.trim().is_empty()))
-        .unwrap_or_else(|| {
-            std::env::home_dir()
-                .map(|home| home.join(".dsh"))
-                .unwrap_or_else(|| PathBuf::from(".dsh"))
-                .to_string_lossy()
-                .into_owned()
-        })
+        .or_else(|| lookup("DSH_HOME").filter(|value| !value.trim().is_empty()));
+    if let Some(home) = from_env {
+        return normalize_home(Path::new(&home));
+    }
+    // 3. ~/.dsh (upstream `defaultDshHome`,
+    //    `packages/util/home-paths/src/index.ts:62`).
+    let default = std::env::home_dir()
+        .map(|home| home.join(".dsh"))
+        .unwrap_or_else(|| PathBuf::from(".dsh"));
+    normalize_home(&default)
+}
+
+/// Normalize a selected home to an absolute path with `~` expanded
+/// (upstream `resolve(expandHomePath(selected))`).
+fn normalize_home(path: &Path) -> PathBuf {
+    let expanded = expand_home(path);
+    if expanded.is_absolute() {
+        expanded
+    } else {
+        std::path::absolute(&expanded).unwrap_or(expanded)
+    }
+}
+
+/// Expand a leading `~` (or `~/...`) to the user's home directory (upstream
+/// `expandHomePath`, `packages/util/home-paths/src/index.ts:70-74`).
+fn expand_home(path: &Path) -> PathBuf {
+    let mut components = path.components();
+    match components.next() {
+        Some(std::path::Component::Normal(segment)) if segment == "~" => {
+            let rest: PathBuf = components.as_path().to_path_buf();
+            match std::env::home_dir() {
+                Some(home) => home.join(rest),
+                None => path.to_path_buf(),
+            }
+        }
+        _ => path.to_path_buf(),
+    }
 }
 
 /// Read a non-empty parent-environment variable, or `None` when unset or
@@ -668,6 +733,120 @@ mod tests {
             Some("user-key"),
             "caller env entries flow through verbatim"
         );
+    }
+
+    // --- DSH_HOME resolution matrix (spec §3) ---------------------------
+
+    /// The default `~/.dsh` fallback for the current user.
+    fn default_home() -> PathBuf {
+        std::env::home_dir()
+            .map(|home| home.join(".dsh"))
+            .unwrap_or_else(|| PathBuf::from(".dsh"))
+    }
+
+    #[test]
+    fn resolve_home_explicit_dsh_home_wins_over_inherited() {
+        // (a) an explicit Config::dsh_home wins over an inherited DSH_HOME
+        // (spec §3.1, rule 1 over rules 2-3).
+        let config = Config {
+            dsh_home: Some(PathBuf::from("/configured/home")),
+            env: Some(HashMap::from([("DSH_HOME".into(), "/env/home".into())])),
+            ..Config::default()
+        };
+        let parent = HashMap::from([("DSH_HOME".to_string(), "/inherited/home".to_string())]);
+        assert_eq!(
+            config.resolve_dsh_home(&parent),
+            PathBuf::from("/configured/home")
+        );
+    }
+
+    #[test]
+    fn resolve_home_inherited_dsh_home_used_when_unconfigured() {
+        // (b) a non-empty inherited DSH_HOME is used when dsh_home is None
+        // (spec §3.1, rule 2).
+        let config = Config::default();
+        let parent = HashMap::from([("DSH_HOME".to_string(), "/inherited/home".to_string())]);
+        assert_eq!(
+            config.resolve_dsh_home(&parent),
+            PathBuf::from("/inherited/home")
+        );
+    }
+
+    #[test]
+    fn resolve_home_blank_dsh_home_falls_through_to_default() {
+        // (c) blank/whitespace-only DSH_HOME counts as unset and falls
+        // through to ~/.dsh (spec §3.1, §3.2.2; upstream
+        // `packages/util/home-paths/src/index.ts:88-89`).
+        for blank in ["", "   ", "\t"] {
+            let parent = HashMap::from([("DSH_HOME".to_string(), blank.to_string())]);
+            assert_eq!(
+                Config::default().resolve_dsh_home(&parent),
+                default_home(),
+                "blank DSH_HOME {blank:?} must count as unset"
+            );
+        }
+        // The same blank rule applies to a DSH_HOME inside Config::env: it
+        // falls through to the parent environment.
+        let config = Config {
+            env: Some(HashMap::from([("DSH_HOME".into(), "   ".into())])),
+            ..Config::default()
+        };
+        let parent = HashMap::from([("DSH_HOME".to_string(), "/inherited/home".to_string())]);
+        assert_eq!(
+            config.resolve_dsh_home(&parent),
+            PathBuf::from("/inherited/home"),
+            "a blank Config::env DSH_HOME must fall through to the parent env"
+        );
+    }
+
+    #[test]
+    fn resolve_home_nothing_set_resolves_default() {
+        // (d) nothing configured anywhere → ~/.dsh (spec §3.1, rule 3; the
+        // deliberate divergence from Python's refusal, spec §3.3).
+        let parent = HashMap::new();
+        assert_eq!(Config::default().resolve_dsh_home(&parent), default_home());
+    }
+
+    #[test]
+    fn resolve_home_is_absolute_with_tilde_expanded() {
+        // (e) the resolved home is absolute with `~` expanded (spec §3.2.3;
+        // upstream `resolve(expandHomePath(selected))`).
+        let parent = HashMap::from([("DSH_HOME".to_string(), "~/dsh-test-home".to_string())]);
+        let home = Config::default().resolve_dsh_home(&parent);
+        assert!(
+            home.is_absolute(),
+            "resolved home must be absolute: {home:?}"
+        );
+        assert!(
+            !home.to_string_lossy().contains('~'),
+            "resolved home must have ~ expanded: {home:?}"
+        );
+        assert_eq!(home, default_home().parent().unwrap().join("dsh-test-home"));
+        // The same normalization applies to an explicit Config::dsh_home.
+        let config = Config {
+            dsh_home: Some(PathBuf::from("~/dsh-configured")),
+            ..Config::default()
+        };
+        let home = config.resolve_dsh_home(&HashMap::new());
+        assert!(
+            home.is_absolute(),
+            "resolved home must be absolute: {home:?}"
+        );
+        assert!(
+            !home.to_string_lossy().contains('~'),
+            "resolved home must have ~ expanded: {home:?}"
+        );
+        assert_eq!(
+            home,
+            default_home().parent().unwrap().join("dsh-configured")
+        );
+    }
+
+    #[test]
+    fn config_default_profile_is_sdk() {
+        // (f) Config::default().profile == "sdk" (spec §6.1; Python
+        // `python/sdk/src/deepseek_harness/api.py:30`).
+        assert_eq!(Config::default().profile, "sdk");
     }
 
     // --- Config Debug redaction ------------------------------------------

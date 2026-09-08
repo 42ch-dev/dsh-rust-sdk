@@ -22,6 +22,7 @@
 //! runtime. The official runtime and its sources live at
 //! <https://github.com/deepseek-ai/deepseek-harness>.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde_json::Value;
@@ -44,9 +45,6 @@ use crate::runtime::{compose_env, resolve_runtime, Config};
 #[derive(Debug)]
 pub struct DeepSeekHarness {
     client: tokio::sync::Mutex<HarnessClient>,
-    /// The configured session root (`DSH_SESSION_ROOT`), surfaced on every
-    /// [`RunResult`] (Python extension field; TypeScript lacks it).
-    session_root: Option<PathBuf>,
 }
 
 impl DeepSeekHarness {
@@ -60,7 +58,9 @@ impl DeepSeekHarness {
     ///
     /// The child env carries the resolved `DSH_HOME`, the caller's
     /// `Config::env` entries, and `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY`
-    /// when configured (spec §4).
+    /// when configured (spec §4). The resolved harness home is created when
+    /// absent so a fresh home boots (spec §3.2.5); the selection is
+    /// observable through [`Config::resolve_dsh_home`] (spec §3.2.4).
     ///
     /// [`Config::request_timeout`] bounds every request, including
     /// `session/prompt`; `None` (the default) waits indefinitely.
@@ -69,6 +69,13 @@ impl DeepSeekHarness {
     /// propagates, so the spawned child is never leaked (Python parity).
     pub async fn start(config: Config) -> Result<Self, Error> {
         let launch = resolve_runtime(&config)?;
+        // Resolve the harness home and create it when absent so a fresh
+        // home boots (spec §3.2.5); the resolved value is observable
+        // through `Config::resolve_dsh_home` (spec §3.2.4).
+        let parent_env: HashMap<String, String> = std::env::vars().collect();
+        let dsh_home = config.resolve_dsh_home(&parent_env);
+        std::fs::create_dir_all(&dsh_home).map_err(Error::Io)?;
+        tracing::info!(dsh_home = %dsh_home.display(), "resolved DSH_HOME");
         let cwd = match &config.cwd {
             Some(path) => path.canonicalize().map_err(Error::Io)?,
             None => std::env::current_dir().map_err(Error::Io)?,
@@ -108,7 +115,6 @@ impl DeepSeekHarness {
         }
         Ok(Self {
             client: tokio::sync::Mutex::new(client),
-            session_root: config.session_root.map(PathBuf::from),
         })
     }
 
@@ -319,7 +325,9 @@ impl Session<'_> {
             finish_reason,
             events,
             notifications,
-            session_root: self.harness.session_root.clone(),
+            // `Config::session_root` is removed (spec §5); the field itself
+            // is dropped by plan 05 task 3 (spec §6.2).
+            session_root: None,
         })
     }
 }

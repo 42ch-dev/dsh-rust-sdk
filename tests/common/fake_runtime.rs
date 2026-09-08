@@ -87,15 +87,16 @@ impl FakeRuntime {
     }
 }
 
-/// The session root injected into every high-level harness in this suite, so
-/// `RunResult::session_root` is observable without touching the disk.
-pub fn test_session_root() -> PathBuf {
-    PathBuf::from("/tmp/dsh-sdk-test-session-root")
+/// A unique temp directory for the harness home, so the fake-runtime suite
+/// never touches a real `~/.dsh`: `DeepSeekHarness::start` creates the
+/// resolved home at boot (spec §3.2.5).
+fn temp_home_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("dsh-sdk-test-home-{}", Uuid::new_v4()))
 }
 
 /// A [`Config`] for `DeepSeekHarness::start` that launches the fake-runtime
 /// peer against `script`: Python-parity defaults, the suite's fast
-/// close-ladder timeouts, and the suite's session root.
+/// close-ladder timeouts, and a temp harness home.
 ///
 /// The fake runtime is launched through the real launch model — `dsh_bin`
 /// names the fixture and the scenario path rides as a `--patch` (temp file,
@@ -106,7 +107,7 @@ pub fn harness_config(script: &[Directive]) -> Result<Config, serde_json::Error>
         dsh_bin: Some(fake_runtime_bin().to_string()),
         patches: vec![script_path],
         timeouts: test_timeouts(),
-        session_root: Some(test_session_root().to_string_lossy().into_owned()),
+        dsh_home: Some(temp_home_dir()),
         ..Config::default()
     })
 }

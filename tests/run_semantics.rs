@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 
 use common::fake_runtime::{
     emit, exit, expect, expect_params, harness_config, respond, respond_error, run_prefix,
-    server_info_result, test_session_root, Directive,
+    server_info_result, Directive,
 };
 
 /// The canonical session ids for the run-semantics scenarios.
@@ -159,7 +159,9 @@ async fn full_happy_path_yields_python_run_result() {
             .and_then(Value::as_str),
         Some("idle")
     );
-    assert_eq!(result.session_root, Some(test_session_root()));
+    // `Config::session_root` is removed (spec §5); `RunResult::session_root`
+    // is always `None` until plan 05 task 3 drops the field (spec §6.2).
+    assert_eq!(result.session_root, None);
 }
 
 #[tokio::test]
