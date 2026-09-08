@@ -103,6 +103,13 @@ pub struct InitializeParams {
     pub provider: String,
     /// Model name every SDK-created agent runs on.
     pub model: String,
+    /// Optional reasoning-effort id inherited by SDK-created agents and
+    /// their in-process descendants (upstream
+    /// `packages/sdk/protocol/src/types.ts:24`). Omitted from the wire when
+    /// `None` or blank (spec §6.3): the server rejects an empty string
+    /// (`packages/sdk/server/src/server.ts:136-138`).
+    #[serde(rename = "reasoningEffort", skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     /// Optional positive output-token cap inherited by SDK-created agents and
     /// their in-process descendants. Omitted from the wire when `None`.
     ///
@@ -453,6 +460,7 @@ mod tests {
             cwd: "/x".into(),
             provider: "deepseek".into(),
             model: "m".into(),
+            reasoning_effort: None,
             max_tokens: Some(1024),
         };
         assert_round_trip(
@@ -467,10 +475,45 @@ mod tests {
             cwd: "/x".into(),
             provider: "deepseek".into(),
             model: "m".into(),
+            reasoning_effort: None,
             max_tokens: None,
         };
         let out = serde_json::to_value(&params).unwrap();
         assert_eq!(out, json!({"cwd":"/x","provider":"deepseek","model":"m"}));
+    }
+
+    #[test]
+    fn initialize_params_omits_reasoning_effort_when_none() {
+        let params = InitializeParams {
+            cwd: "/x".into(),
+            provider: "deepseek".into(),
+            model: "m".into(),
+            reasoning_effort: None,
+            max_tokens: None,
+        };
+        let out = serde_json::to_value(&params).unwrap();
+        assert_eq!(
+            out,
+            json!({"cwd":"/x","provider":"deepseek","model":"m"}),
+            "unset reasoningEffort must be omitted from params entirely (spec §6.3)"
+        );
+    }
+
+    #[test]
+    fn initialize_params_serializes_reasoning_effort() {
+        let params = InitializeParams {
+            cwd: "/x".into(),
+            provider: "deepseek".into(),
+            model: "m".into(),
+            reasoning_effort: Some("high".into()),
+            max_tokens: None,
+        };
+        let out = serde_json::to_value(&params).unwrap();
+        assert_eq!(
+            out,
+            json!({"cwd":"/x","provider":"deepseek","model":"m","reasoningEffort":"high"}),
+            "a set reasoningEffort must serialize under the wire key reasoningEffort (spec §6.3)"
+        );
     }
 
     #[test]

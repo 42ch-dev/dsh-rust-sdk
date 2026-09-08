@@ -31,7 +31,7 @@ const UNRELATED_SESSION: &str = "unrelated";
 
 async fn initialize_ok(rt: &mut FakeRuntime) {
     rt.client
-        .initialize("/tmp", "deepseek", "deepseek-chat", Some(1024))
+        .initialize("/tmp", "deepseek", "deepseek-chat", None, Some(1024))
         .await
         .expect("initialize succeeds");
 }
@@ -45,6 +45,7 @@ async fn initialize_happy_path_returns_server_info() {
                 "cwd": "/tmp",
                 "provider": "deepseek",
                 "model": "deepseek-chat",
+                "reasoningEffort": "high",
                 "maxTokens": 1024,
             }),
         ),
@@ -54,7 +55,13 @@ async fn initialize_happy_path_returns_server_info() {
 
     let result = rt
         .client
-        .initialize("/tmp", "deepseek", "deepseek-chat", Some(1024))
+        .initialize(
+            "/tmp",
+            "deepseek",
+            "deepseek-chat",
+            Some("high"),
+            Some(1024),
+        )
         .await
         .expect("initialize succeeds");
     assert_eq!(
@@ -76,7 +83,7 @@ async fn initialize_with_wrong_server_name_returns_sdk_protocol() {
 
     let err = rt
         .client
-        .initialize("/tmp", "deepseek", "deepseek-chat", Some(1024))
+        .initialize("/tmp", "deepseek", "deepseek-chat", None, Some(1024))
         .await
         .expect_err("initialize must reject a foreign server identity");
     assert!(

@@ -79,8 +79,9 @@ pub struct Config {
     /// `"deepseek-v4-flash"`, `python/sdk/src/deepseek_harness/api.py:22`).
     pub model: String,
     /// Optional `reasoningEffort` for `initialize` (Python
-    /// `python/sdk/src/deepseek_harness/api.py:24`). Surface only in this
-    /// plan; the wire rule lands with plan 06.
+    /// `python/sdk/src/deepseek_harness/api.py:24`). Omitted from the wire
+    /// when unset or blank (spec §6.3); the value actually sent is
+    /// [`Config::reasoning_effort_for_wire`].
     pub reasoning_effort: Option<String>,
     /// Optional `maxTokens` for `initialize` (rejected when `0`).
     pub max_tokens: Option<u32>,
@@ -383,6 +384,19 @@ impl Config {
     pub fn resolve_dsh_home(&self, parent_env: &HashMap<String, String>) -> PathBuf {
         resolve_dsh_home_with(self, &|name| parent_env.get(name).cloned())
     }
+
+    /// The `reasoningEffort` value to send on `initialize`, or `None` when
+    /// unset or blank (spec §6.3): an empty or whitespace-only
+    /// [`Config::reasoning_effort`] is treated as unset and dropped, never
+    /// sent — the server rejects an empty string
+    /// (`packages/sdk/server/src/server.ts:136-138`). A non-blank value is
+    /// returned verbatim (untrimmed), matching the reference clients' pass-
+    /// through behaviour.
+    pub(crate) fn reasoning_effort_for_wire(&self) -> Option<&str> {
+        self.reasoning_effort
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+    }
 }
 
 /// `Config::resolve_dsh_home` with an injectable parent-environment lookup
@@ -493,6 +507,51 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("create the patch-test case dir");
         dir
+    }
+
+    // --- reasoning_effort: omit-when-unset wire rule (spec §6.3) ----------
+
+    #[test]
+    fn reasoning_effort_for_wire_drops_unset_and_blank_values() {
+        let unset = Config {
+            reasoning_effort: None,
+            ..Config::default()
+        };
+        assert_eq!(
+            unset.reasoning_effort_for_wire(),
+            None,
+            "unset reasoning_effort must be treated as unset"
+        );
+
+        let empty = Config {
+            reasoning_effort: Some(String::new()),
+            ..Config::default()
+        };
+        assert_eq!(
+            empty.reasoning_effort_for_wire(),
+            None,
+            "an empty reasoning_effort must be dropped, never sent (spec §6.3)"
+        );
+
+        let whitespace = Config {
+            reasoning_effort: Some("  \t ".into()),
+            ..Config::default()
+        };
+        assert_eq!(
+            whitespace.reasoning_effort_for_wire(),
+            None,
+            "a whitespace-only reasoning_effort must be dropped, never sent (spec §6.3)"
+        );
+
+        let set = Config {
+            reasoning_effort: Some("high".into()),
+            ..Config::default()
+        };
+        assert_eq!(
+            set.reasoning_effort_for_wire(),
+            Some("high"),
+            "a non-blank reasoning_effort must be sent verbatim"
+        );
     }
 
     // --- resolve_runtime: launch grammar + AC10 ---------------------------

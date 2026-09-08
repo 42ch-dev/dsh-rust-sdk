@@ -344,11 +344,19 @@ impl HarnessClient {
     /// `deepseek-harness-sdk-runtime`, or when `version` is absent — the
     /// protocol declares the name wire-stable and has no version negotiation,
     /// so an unexpected identity is a hard protocol error.
+    ///
+    /// `reasoning_effort` is sent verbatim as the wire key `reasoningEffort`
+    /// (spec §6.3); pass `None` when unset. The high-level path
+    /// ([`DeepSeekHarness::start`](crate::api::DeepSeekHarness::start))
+    /// normalizes [`Config::reasoning_effort`](crate::runtime::Config::reasoning_effort)
+    /// through `Config::reasoning_effort_for_wire`, which drops empty and
+    /// whitespace-only values before they reach this call.
     pub async fn initialize(
         &mut self,
         cwd: impl Into<String>,
         provider: impl Into<String>,
         model: impl Into<String>,
+        reasoning_effort: Option<&str>,
         max_tokens: Option<u32>,
     ) -> Result<InitializeResult, Error> {
         if max_tokens == Some(0) {
@@ -360,6 +368,7 @@ impl HarnessClient {
             cwd: cwd.into(),
             provider: provider.into(),
             model: model.into(),
+            reasoning_effort: reasoning_effort.map(str::to_string),
             max_tokens,
         };
         let result = self

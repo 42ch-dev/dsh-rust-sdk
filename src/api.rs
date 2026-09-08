@@ -108,6 +108,7 @@ impl DeepSeekHarness {
                 cwd.to_string_lossy().into_owned(),
                 &config.provider,
                 &config.model,
+                config.reasoning_effort_for_wire(),
                 config.max_tokens,
             )
             .await
