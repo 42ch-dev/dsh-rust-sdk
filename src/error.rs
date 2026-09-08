@@ -12,7 +12,10 @@ use std::fmt;
 pub struct SelectedProfile(Option<String>);
 
 impl SelectedProfile {
-    /// The profile selected for the launch.
+    /// The profile selected for the launch, named in the timeout message
+    /// Python-style when the handshake wedges (spec §7; Python appends
+    /// `selected dsh profile {profile!r}` —
+    /// `python/sdk/src/deepseek_harness/client.py:158-160`).
     pub fn new(profile: impl Into<String>) -> Self {
         Self(Some(profile.into()))
     }
@@ -41,15 +44,15 @@ pub enum Error {
     TransportClosed(String),
 
     /// A request did not get a response within the configured timeout.
-    #[error("{method} timed out waiting for DeepSeek Harness runtime: {source}{profile}")]
+    #[error("{method} timed out waiting for DeepSeek Harness runtime: {source}")]
     RequestTimeout {
-        /// The JSON-RPC method that timed out.
+        /// The JSON-RPC method that timed out. When the timeout path has
+        /// profile context (the `initialize` handshake on the high-level
+        /// path), the selected profile is appended parenthetically so the
+        /// message names it (spec §7; Python appends
+        /// `selected dsh profile {profile!r}` —
+        /// `python/sdk/src/deepseek_harness/client.py:158-160`).
         method: String,
-        /// The selected DSH profile, named so a wedged handshake is
-        /// diagnosable (spec §7; Python appends
-        /// `selected dsh profile {profile!r}`). Empty for requests whose
-        /// timeout path has no profile context.
-        profile: SelectedProfile,
         /// The underlying timeout error.
         #[source]
         source: tokio::time::error::Elapsed,
@@ -131,7 +134,6 @@ mod tests {
     async fn display_request_timeout() {
         let err = Error::RequestTimeout {
             method: "initialize".into(),
-            profile: SelectedProfile::default(),
             source: elapsed().await,
         };
         assert_eq!(
@@ -141,16 +143,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn display_request_timeout_names_profile() {
+    async fn display_request_timeout_names_profile_in_message() {
+        // The profile is carried in the message, not the variant shape: the
+        // timeout path embeds the selected profile parenthetically in
+        // `method` (spec §7; Python appends
+        // `selected dsh profile {profile!r}`).
         let err = Error::RequestTimeout {
-            method: "initialize".into(),
-            profile: SelectedProfile::new("sdk"),
+            method: format!("initialize{}", SelectedProfile::new("sdk")),
             source: elapsed().await,
         };
         assert_eq!(
             err.to_string(),
-            "initialize timed out waiting for DeepSeek Harness runtime: deadline has elapsed \
-             (selected dsh profile 'sdk')"
+            "initialize (selected dsh profile 'sdk') timed out waiting for \
+             DeepSeek Harness runtime: deadline has elapsed"
         );
     }
 
@@ -220,7 +225,6 @@ mod tests {
         assert!(!Error::TransportClosed("x".into()).is_protocol());
         assert!(!Error::RequestTimeout {
             method: "m".into(),
-            profile: SelectedProfile::default(),
             source: elapsed().await,
         }
         .is_protocol());

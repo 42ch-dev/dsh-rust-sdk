@@ -31,7 +31,7 @@ use uuid::Uuid;
 use crate::client::{
     HarnessClient, LaunchSpec, NotificationSubscription, DEFAULT_BROADCAST_CAPACITY,
 };
-use crate::error::Error;
+use crate::error::{Error, SelectedProfile};
 use crate::protocol::{ContentBlock, Notification};
 use crate::runtime::{
     compose_env_with_home, env_var_non_empty, resolve_dsh_home_with, resolve_runtime, Config,
@@ -108,13 +108,13 @@ impl DeepSeekHarness {
         timeouts.initialize_timeout = config.initialize_timeout;
         let mut client = HarnessClient::spawn(spec, timeouts)?;
         if let Err(err) = client
-            .initialize(
+            .initialize_with_profile(
                 cwd.to_string_lossy().into_owned(),
                 &config.provider,
                 &config.model,
                 config.reasoning_effort_for_wire(),
                 config.max_tokens,
-                &config.profile,
+                SelectedProfile::new(&config.profile),
             )
             .await
         {

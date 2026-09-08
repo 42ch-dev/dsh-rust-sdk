@@ -31,7 +31,7 @@ const UNRELATED_SESSION: &str = "unrelated";
 
 async fn initialize_ok(rt: &mut FakeRuntime) {
     rt.client
-        .initialize("/tmp", "deepseek", "deepseek-chat", None, Some(1024), "sdk")
+        .initialize("/tmp", "deepseek", "deepseek-chat", None, Some(1024))
         .await
         .expect("initialize succeeds");
 }
@@ -61,7 +61,6 @@ async fn initialize_happy_path_returns_server_info() {
             "deepseek-chat",
             Some("high"),
             Some(1024),
-            "sdk",
         )
         .await
         .expect("initialize succeeds");
@@ -84,7 +83,7 @@ async fn initialize_with_wrong_server_name_returns_sdk_protocol() {
 
     let err = rt
         .client
-        .initialize("/tmp", "deepseek", "deepseek-chat", None, Some(1024), "sdk")
+        .initialize("/tmp", "deepseek", "deepseek-chat", None, Some(1024))
         .await
         .expect_err("initialize must reject a foreign server identity");
     assert!(
@@ -346,11 +345,13 @@ async fn request_timeout_returns_request_timeout() {
 }
 
 #[tokio::test]
-async fn initialize_timeout_bounds_handshake_and_names_profile() {
+async fn initialize_timeout_bounds_handshake() {
     // Spec §6.4 / launch spec §7: the handshake is bounded by
-    // `initialize_timeout` (not `request_timeout`), and the timeout error
-    // names the selected profile. The peer accepts the initialize frame and
-    // never replies; a short bound keeps the test fast.
+    // `initialize_timeout` (not `request_timeout`). The peer accepts the
+    // initialize frame and never replies; a short bound keeps the test
+    // fast. The low-level path has no profile context, so the message names
+    // no profile here — the high-level `start()` path carries it (see
+    // `start_bounds_initialize_handshake_via_config`).
     let spec = fake_runtime_spec(&[expect("initialize"), ignore_all()]).expect("serialize script");
     let timeouts = ClientTimeouts {
         initialize_timeout: Some(Duration::from_millis(200)),
@@ -360,7 +361,7 @@ async fn initialize_timeout_bounds_handshake_and_names_profile() {
 
     let started = std::time::Instant::now();
     let err = client
-        .initialize("/tmp", "deepseek", "deepseek-chat", None, Some(1024), "sdk")
+        .initialize("/tmp", "deepseek", "deepseek-chat", None, Some(1024))
         .await
         .expect_err("an unanswered initialize must time out");
     assert!(
@@ -370,10 +371,6 @@ async fn initialize_timeout_bounds_handshake_and_names_profile() {
     match &err {
         Error::RequestTimeout { method, .. } => {
             assert_eq!(method, "initialize");
-            assert!(
-                err.to_string().contains("selected dsh profile 'sdk'"),
-                "the timeout message must name the selected profile: {err}"
-            );
         }
         other => panic!("expected RequestTimeout, got {other:?}"),
     }
@@ -401,7 +398,10 @@ async fn start_bounds_initialize_handshake_via_config() {
     );
     match &err {
         Error::RequestTimeout { method, .. } => {
-            assert_eq!(method, "initialize");
+            assert!(
+                method.starts_with("initialize"),
+                "the timed-out method must still be identifiable: {method}"
+            );
             assert!(
                 err.to_string().contains("selected dsh profile 'sdk'"),
                 "the timeout message must name the selected profile: {err}"

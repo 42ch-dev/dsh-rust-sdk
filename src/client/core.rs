@@ -350,8 +350,11 @@ impl HarnessClient {
                     // response is dropped; the server-side work continues.
                     lock(&self.pending).remove(&id);
                     return Err(Error::RequestTimeout {
-                        method: method.to_string(),
-                        profile,
+                        // The selected profile rides in the message, not the
+                        // public variant shape (spec §7): `SelectedProfile`
+                        // renders the parenthetical suffix, or nothing when
+                        // the timeout path has no profile context.
+                        method: format!("{method}{profile}"),
                         source: elapsed,
                     });
                 }
@@ -391,7 +394,9 @@ impl HarnessClient {
     /// (spec §6.4) — the bound applies to the handshake only, never to
     /// `session/prompt` or the activity interval, which keep using
     /// [`ClientTimeouts::request_timeout`]. On expiry the error is
-    /// [`Error::RequestTimeout`] naming `profile` (spec §7).
+    /// [`Error::RequestTimeout`]; the high-level
+    /// [`DeepSeekHarness::start`](crate::api::DeepSeekHarness::start) path
+    /// names the selected profile in the message (spec §7).
     pub async fn initialize(
         &mut self,
         cwd: impl Into<String>,
@@ -399,7 +404,33 @@ impl HarnessClient {
         model: impl Into<String>,
         reasoning_effort: Option<&str>,
         max_tokens: Option<u32>,
-        profile: &str,
+    ) -> Result<InitializeResult, Error> {
+        self.initialize_with_profile(
+            cwd,
+            provider,
+            model,
+            reasoning_effort,
+            max_tokens,
+            SelectedProfile::default(),
+        )
+        .await
+    }
+
+    /// [`HarnessClient::initialize`] with the selected profile threaded to
+    /// the timeout diagnostic (spec §7).
+    ///
+    /// `pub(crate)` so the high-level
+    /// [`DeepSeekHarness::start`](crate::api::DeepSeekHarness::start) path
+    /// names the profile in the timeout message while the public low-level
+    /// signature stays unchanged.
+    pub(crate) async fn initialize_with_profile(
+        &mut self,
+        cwd: impl Into<String>,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        reasoning_effort: Option<&str>,
+        max_tokens: Option<u32>,
+        profile: SelectedProfile,
     ) -> Result<InitializeResult, Error> {
         if max_tokens == Some(0) {
             return Err(Error::SdkProtocol {
@@ -418,7 +449,7 @@ impl HarnessClient {
                 "initialize",
                 Some(serde_json::to_value(params)?),
                 self.timeouts.initialize_timeout,
-                SelectedProfile::new(profile),
+                profile,
             )
             .await?;
         let init: InitializeResult =
