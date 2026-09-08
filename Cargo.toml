@@ -19,7 +19,6 @@ categories = ["api-bindings", "asynchronous"]
 include = [
     "src/**",
     "tests/**",
-    "assets/cordis.yml",
     "/README.md",
     "/README.zh.md",
     "/README.i18n.yaml",

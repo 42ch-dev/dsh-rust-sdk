@@ -58,7 +58,7 @@ async fn real_runtime_smoke() {
     std::fs::create_dir_all(&session_root).expect("create temp session root");
 
     let mut harness = DeepSeekHarness::start(Config {
-        runtime_bin: Some(runtime_bin),
+        dsh_bin: Some(runtime_bin),
         api_key: Some(api_key),
         session_root: Some(session_root.to_string_lossy().into_owned()),
         // Bound the wire requests so a wedged runtime fails fast instead of

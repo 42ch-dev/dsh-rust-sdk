@@ -16,9 +16,10 @@
 //! surface parity.
 //!
 //! The runtime binary is bring-your-own (Plan A): [`DeepSeekHarness::start`]
-//! resolves it from `Config::runtime_bin` / `launch_args_override` or the
-//! `DSH_RUNTIME_BIN` environment variable. This crate never downloads or
-//! bundles a runtime. The official runtime and its sources live at
+//! resolves it from `Config::dsh_bin` or the `DSH_RUNTIME_BIN` environment
+//! variable and boots it under the configured `profile` (`dsh --profile
+//! <name> [--patch <path>]...`). This crate never downloads or bundles a
+//! runtime. The official runtime and its sources live at
 //! <https://github.com/deepseek-ai/deepseek-harness>.
 
 use std::path::PathBuf;
@@ -53,17 +54,16 @@ impl DeepSeekHarness {
     /// subprocess, and perform the `initialize` handshake.
     ///
     /// `Config::cwd` is resolved absolute (Python `Path(cwd).resolve()`) and
-    /// feeds both `DSH_CWD` and `initialize.cwd`; a nonexistent cwd fails
-    /// with [`Error::Io`]. The runtime subprocess cwd defaults to the same
-    /// resolved cwd (`Config::runtime_cwd` overrides it — Python parity).
+    /// feeds `initialize.cwd`; a nonexistent cwd fails with [`Error::Io`].
+    /// The runtime subprocess cwd defaults to the same resolved cwd
+    /// (`Config::runtime_cwd` overrides it — Python parity).
+    ///
+    /// The child env carries the resolved `DSH_HOME`, the caller's
+    /// `Config::env` entries, and `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY`
+    /// when configured (spec §4).
     ///
     /// [`Config::request_timeout`] bounds every request, including
     /// `session/prompt`; `None` (the default) waits indefinitely.
-    ///
-    /// A failure to extract or verify the bundled default `cordis.yml`
-    /// (when no effective `DSH_CORDIS_CONFIG` exists) propagates as
-    /// [`Error::Io`] — the required default-config injection never degrades
-    /// silently to a config-less launch.
     ///
     /// On `initialize` failure the close ladder is run before the error
     /// propagates, so the spawned child is never leaked (Python parity).
@@ -76,7 +76,7 @@ impl DeepSeekHarness {
         let spec = LaunchSpec {
             program: launch.program,
             args: launch.args,
-            envs: compose_env(&config, &cwd)?.into_iter().collect(),
+            envs: compose_env(&config)?.into_iter().collect(),
             cwd: Some(config.runtime_cwd.clone().unwrap_or_else(|| cwd.clone())),
         };
         // `Config::request_timeout` is the Python-parity request deadline

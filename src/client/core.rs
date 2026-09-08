@@ -2,6 +2,7 @@
 //! [`ClientTimeouts`], and the public request helpers.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -34,9 +35,9 @@ use super::{
 #[derive(Debug, Clone)]
 pub struct LaunchSpec {
     /// Path to (or name of) the runtime executable.
-    pub program: String,
+    pub program: PathBuf,
     /// Extra command-line arguments passed to the runtime.
-    pub args: Vec<String>,
+    pub args: Vec<OsString>,
     /// Environment overrides; the parent environment is inherited and these
     /// entries are layered on top.
     pub envs: HashMap<String, String>,
@@ -155,7 +156,10 @@ impl HarnessClient {
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                return Err(Error::RuntimeNotFound(format!("{}: {err}", spec.program)));
+                return Err(Error::RuntimeNotFound(format!(
+                    "{}: {err}",
+                    spec.program.display()
+                )));
             }
             Err(err) => return Err(Error::Io(err)),
         };

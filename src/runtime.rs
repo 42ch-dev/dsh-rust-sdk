@@ -1,64 +1,55 @@
-//! Runtime binary resolution and environment injection (Plan A: the caller
+//! Runtime launch composition and child environment (Plan A: the caller
 //! brings their own runtime binary; this crate does not download or bundle
 //! one).
 //!
-//! [`resolve_runtime`] picks the launch command with Python `HarnessClient`
-//! parity:
+//! The DSH runtime is the `dsh` CLI booted under a named profile
+//! (`apps/cli/package.json:2,15-17` upstream): there is no separate
+//! JSON-RPC carrier program. [`resolve_runtime`] therefore composes a
+//! **launch** — program + ordered argv — rather than resolving a bare
+//! executable:
 //!
-//! 1. `Config::launch_args_override` (non-empty) — the whole argv, verbatim;
-//! 2. `Config::runtime_bin`;
-//! 3. `DSH_RUNTIME_BIN` from the parent environment;
-//! 4. otherwise [`Error::RuntimeNotFound`] with acquisition hints.
+//! 1. `Config::dsh_bin` (non-empty);
+//! 2. `DSH_RUNTIME_BIN` from the parent environment (non-empty);
+//! 3. otherwise [`Error::RuntimeNotFound`] with acquisition hints.
+//!
+//! The argv is exactly `--profile <name>` followed by one `--patch <abs
+//! path>` pair per configured patch, in caller order (upstream launch
+//! grammar, `apps/cli/src/args.ts:137-140,144-146`; Python
+//! `python/sdk/src/deepseek_harness/client.py:481-486`). An empty `profile`
+//! is rejected locally before spawn.
 //!
 //! [`compose_env`] builds the override set injected into the runtime
-//! subprocess: the SDK keys win over the caller's extra `Config::env` entries
-//! (Python `dict.update` semantics) and the parent environment is inherited
-//! wholesale for every key not in the set. When no effective
-//! `DSH_CORDIS_CONFIG` exists, the SDK-bundled default config
-//! ([`bundled_default_config_path`], a byte-identical copy of the official
-//! runtime's default `cordis.yml`) is injected.
+//! subprocess: the resolved `DSH_HOME` (non-empty `$DSH_HOME` from
+//! `Config::env`, then the parent environment, else `~/.dsh` — upstream
+//! `resolveDshHome`, `packages/util/home-paths/src/index.ts:87-91`), the
+//! caller's `Config::env` entries verbatim, and `DEEPSEEK_BASE_URL` /
+//! `DEEPSEEK_API_KEY` when configured. The caller's `Config::env` wins over
+//! the injected `DSH_HOME` on collision (Python `env.update(self.config.env)`
+//! ordering, `python/sdk/src/deepseek_harness/client.py:75-77`). The crate
+//! never writes `DSH_CORDIS_CONFIG`, `DSH_SESSION_ROOT`, or `DSH_CWD` —
+//! none has a reader upstream (spec §4.2).
 //!
 //! The official runtime and its sources live at
 //! <https://github.com/deepseek-ai/deepseek-harness>.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fmt;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::LazyLock;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::client::ClientTimeouts;
 use crate::error::Error;
-
-/// Bundled default runtime configuration. Byte-identical to the official
-/// DeepSeek Harness default `cordis.yml`; extracted to a temp location on
-/// first use via [`bundled_default_config_path`].
-const DEFAULT_CORDIS_YML: &[u8] = include_bytes!("../assets/cordis.yml");
 
 /// Acquisition hints embedded in [`Error::RuntimeNotFound`] when no runtime
 /// binary is configured anywhere. Names the bring-your-own route and the
 /// build-from-source route; must never advertise a not-yet-published Rust
 /// companion crate or a Python wheel as a v0.1 install path.
 const RUNTIME_NOT_FOUND_HINT: &str = "no DeepSeek Harness runtime binary is configured. \
-Bring your own: set DSH_RUNTIME_BIN (or Config::runtime_bin / launch_args_override) to a \
-runtime binary you already have, or build the official runtime from the deepseek-harness \
-repository (https://github.com/deepseek-ai/deepseek-harness) with \
+Bring your own: set DSH_RUNTIME_BIN (or Config::dsh_bin) to a runtime binary you already \
+have, or build the official runtime from the deepseek-harness repository \
+(https://github.com/deepseek-ai/deepseek-harness) with \
 `scripts/build-exe-for-python-sdk.ts` and point DSH_RUNTIME_BIN at the built executable";
-
-/// Cached temp path of the extracted default config. The path's initializer
-/// is known at declaration time, so the cell and initializer live together.
-static DEFAULT_CONFIG_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
-    std::env::temp_dir().join(format!(
-        "deepseek-harness-sdk-{}-cordis.yml",
-        env!("CARGO_PKG_VERSION")
-    ))
-});
-
-/// Monotonic counter making extraction temp names unique per attempt, so
-/// concurrent first-use extractions (separate threads or processes) never
-/// collide on the temp sibling.
-static EXTRACT_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// High-level launch configuration, mirroring Python
 /// `DeepSeekHarnessConfig` (`python/sdk/src/deepseek_harness/api.py`).
@@ -83,13 +74,22 @@ pub struct Config {
     /// Optional `maxTokens` for `initialize` (rejected when `0`).
     pub max_tokens: Option<u32>,
     /// Working directory for the agent; defaults to the current directory,
-    /// resolved absolute. Feeds `DSH_CWD` and `initialize.cwd`.
+    /// resolved absolute. Feeds `initialize.cwd`.
     pub cwd: Option<PathBuf>,
     /// Subprocess working directory for the runtime; defaults to `cwd`
     /// (Python parity).
     pub runtime_cwd: Option<PathBuf>,
-    /// Path to (or name of) a runtime binary the caller already has.
-    pub runtime_bin: Option<String>,
+    /// Path to (or name of) a runtime binary the caller already has
+    /// (Python `dsh_bin`, `python/sdk/src/deepseek_harness/api.py:29`).
+    pub dsh_bin: Option<String>,
+    /// The DSH profile to boot (`--profile <name>`); defaults to `"sdk"`
+    /// (Python `python/sdk/src/deepseek_harness/api.py:30`). An empty value
+    /// is rejected locally before spawn.
+    pub profile: String,
+    /// Ordered overlay patches, emitted as one `--patch <abs path>` pair per
+    /// entry in caller order and resolved absolute before spawn (Python
+    /// `python/sdk/src/deepseek_harness/api.py:31`).
+    pub patches: Vec<PathBuf>,
     /// Complete launch argv (program + arguments) replacing the resolved
     /// binary verbatim; an empty list counts as unset (Python truthiness).
     pub launch_args_override: Option<Vec<String>>,
@@ -102,9 +102,9 @@ pub struct Config {
     pub api_key: Option<String>,
     /// Session root directory, injected as `DSH_SESSION_ROOT`.
     pub session_root: Option<String>,
-    /// Extra environment entries layered over the parent environment; SDK
-    /// keys (`DSH_CWD`, `DSH_SESSION_ROOT`, `DSH_CORDIS_CONFIG`,
-    /// `DEEPSEEK_BASE_URL`, `DEEPSEEK_API_KEY`) win on collision.
+    /// Extra environment entries layered over the parent environment; the
+    /// caller's entries win over the crate-injected `DSH_HOME` on collision
+    /// (Python `env.update(self.config.env)` ordering).
     pub env: Option<HashMap<String, String>>,
     /// Per-request response deadline; `None` waits indefinitely (Python
     /// default).
@@ -121,7 +121,9 @@ impl fmt::Debug for Config {
             .field("max_tokens", &self.max_tokens)
             .field("cwd", &self.cwd)
             .field("runtime_cwd", &self.runtime_cwd)
-            .field("runtime_bin", &self.runtime_bin)
+            .field("dsh_bin", &self.dsh_bin)
+            .field("profile", &self.profile)
+            .field("patches", &self.patches)
             .field("launch_args_override", &self.launch_args_override)
             .field("cordis_config", &self.cordis_config)
             .field("base_url", &self.base_url)
@@ -159,7 +161,9 @@ impl Default for Config {
             max_tokens: None,
             cwd: None,
             runtime_cwd: None,
-            runtime_bin: None,
+            dsh_bin: None,
+            profile: "sdk".into(),
+            patches: Vec::new(),
             launch_args_override: None,
             cordis_config: None,
             base_url: None,
@@ -177,27 +181,36 @@ impl Default for Config {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeLaunch {
     /// Path to (or name of) the runtime executable.
-    pub program: String,
-    /// Extra command-line arguments passed to the runtime.
-    pub args: Vec<String>,
+    pub program: PathBuf,
+    /// Command-line arguments passed to the runtime: exactly
+    /// `--profile <name>` followed by one `--patch <abs path>` pair per
+    /// configured patch, in caller order.
+    pub args: Vec<OsString>,
 }
 
 /// Resolve the runtime launch command for a [`Config`].
 ///
-/// Precedence (Python `HarnessClient` parity, plus the Rust-only
+/// Program precedence (Python `HarnessClient` parity, plus the Rust-only
 /// `DSH_RUNTIME_BIN` route):
 ///
-/// 1. `Config::launch_args_override` (non-empty) — the whole argv, verbatim;
-/// 2. `Config::runtime_bin`;
-/// 3. `DSH_RUNTIME_BIN` from the parent environment;
-/// 4. [`Error::RuntimeNotFound`] whose message names both acquisition routes
+/// 1. `Config::dsh_bin` (non-empty);
+/// 2. `DSH_RUNTIME_BIN` from the parent environment;
+/// 3. [`Error::RuntimeNotFound`] whose message names both acquisition routes
 ///    (bring-your-own, and building the official runtime via
 ///    `scripts/build-exe-for-python-sdk.ts`) and cites
 ///    <https://github.com/deepseek-ai/deepseek-harness>.
 ///
-/// An empty `launch_args_override` list and an empty `DSH_RUNTIME_BIN` both
-/// count as absent (Python truthiness), so resolution never produces an
-/// unlaunchable empty program.
+/// The argv is composed from the launch grammar `dsh --profile <name>
+/// [--patch <path>]...` (upstream `apps/cli/src/args.ts:137-140`): the first
+/// pair is `--profile <profile>`, then one `--patch <abs path>` pair per
+/// configured patch in caller order, each resolved absolute before spawn
+/// (Python `Path(patch).expanduser().resolve()` —
+/// `python/sdk/src/deepseek_harness/client.py:483-484`). An empty `profile`
+/// is rejected locally with [`Error::Config`] before spawn (spec §2.2.6).
+///
+/// An empty `dsh_bin` and an empty `DSH_RUNTIME_BIN` both count as absent
+/// (Python truthiness), so resolution never produces an unlaunchable empty
+/// program.
 pub fn resolve_runtime(config: &Config) -> Result<RuntimeLaunch, Error> {
     resolve_runtime_with(config, env_var_non_empty)
 }
@@ -209,133 +222,68 @@ fn resolve_runtime_with(
     config: &Config,
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Result<RuntimeLaunch, Error> {
-    // 1. launch_args_override is the whole argv, verbatim (Python
-    //    `launch_args_override or _default_launch_args()`; an empty list is
-    //    falsy → unset).
-    if let Some(argv) = config
-        .launch_args_override
-        .as_deref()
-        .filter(|argv| !argv.is_empty())
-    {
-        return Ok(RuntimeLaunch {
-            program: argv[0].clone(),
-            args: argv[1..].to_vec(),
-        });
+    // 1. explicit Config dsh_bin (Python `_default_launch_args`).
+    // 2. Rust-only route: DSH_RUNTIME_BIN from the parent environment.
+    // 3. Nothing anywhere → RuntimeNotFound with both acquisition routes.
+    let program = if let Some(bin) = config.dsh_bin.as_deref().filter(|bin| !bin.is_empty()) {
+        PathBuf::from(bin)
+    } else if let Some(bin) = lookup("DSH_RUNTIME_BIN").filter(|bin| !bin.is_empty()) {
+        PathBuf::from(bin)
+    } else {
+        return Err(Error::RuntimeNotFound(RUNTIME_NOT_FOUND_HINT.to_string()));
+    };
+    // The launch grammar is `dsh --profile <name> [--patch <path>]...`
+    // (upstream `apps/cli/src/args.ts:137-140`); an empty profile is
+    // rejected locally (spec §2.2.6) so the failure stays attributable.
+    if config.profile.trim().is_empty() {
+        return Err(Error::Config(
+            "profile must not be empty: dsh --profile <name> is required".to_string(),
+        ));
     }
-    // 2. explicit Config runtime_bin (Python `_default_launch_args`).
-    if let Some(bin) = config.runtime_bin.as_deref().filter(|bin| !bin.is_empty()) {
-        return Ok(RuntimeLaunch {
-            program: bin.to_string(),
-            args: Vec::new(),
-        });
+    let mut args = vec![OsString::from("--profile"), OsString::from(&config.profile)];
+    for patch in &config.patches {
+        // Patch paths are resolved absolute before spawn, matching both
+        // references (Python `Path(patch).expanduser().resolve()` —
+        // `python/sdk/src/deepseek_harness/client.py:483-484`).
+        let abs = patch.canonicalize().map_err(Error::Io)?;
+        args.push(OsString::from("--patch"));
+        args.push(abs.into_os_string());
     }
-    // 3. Rust-only route: DSH_RUNTIME_BIN from the parent environment.
-    if let Some(bin) = lookup("DSH_RUNTIME_BIN").filter(|bin| !bin.is_empty()) {
-        return Ok(RuntimeLaunch {
-            program: bin,
-            args: Vec::new(),
-        });
-    }
-    // 4. Nothing anywhere → RuntimeNotFound with both acquisition routes.
-    Err(Error::RuntimeNotFound(RUNTIME_NOT_FOUND_HINT.to_string()))
+    Ok(RuntimeLaunch { program, args })
 }
 
 /// Compose the environment override set injected into the runtime subprocess.
 ///
-/// Returns exactly the applicable override keys, in a stable order:
-/// caller `Config::env` entries first, then the SDK keys — `DSH_CWD`
-/// (always, from `resolved_cwd`), then `DSH_SESSION_ROOT`, `DSH_CORDIS_CONFIG`,
-/// `DEEPSEEK_BASE_URL`, `DEEPSEEK_API_KEY`, each only when configured. When a
-/// key appears twice, the later entry wins (Python `dict.update` semantics),
-/// so SDK keys override caller-provided env entries. Every other variable is
-/// inherited wholesale from the parent environment by the spawn layer.
+/// Returns exactly the applicable override keys, in a stable order: the
+/// resolved `DSH_HOME` first, then the caller's `Config::env` entries
+/// verbatim, then `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` when configured.
+/// When a key appears twice, the later entry wins at spawn, so the caller's
+/// `Config::env` overrides the injected `DSH_HOME` on collision (Python
+/// `env.update(self.config.env)` ordering —
+/// `python/sdk/src/deepseek_harness/client.py:75-77`). Every other variable
+/// is inherited wholesale from the parent environment by the spawn layer.
 ///
-/// `DSH_CORDIS_CONFIG` resolution, Python-parity (`env.get` truthiness):
-/// `Config::cordis_config` (non-empty) wins; otherwise a non-empty
-/// `DSH_CORDIS_CONFIG` in `Config::env`, then in the parent environment, is
-/// inherited as-is (not part of the override set); empty strings count as
-/// absent — an empty-string `Config::env` entry is skipped on copy so it can
-/// never clobber a non-empty parent value. When nothing effective exists,
-/// the bundled default config ([`bundled_default_config_path`]) is injected.
-///
-/// Deliberate divergence from the Python SDK (documented, do not "fix" to
-/// match Python): Python injects the bundled default only when the bundled
-/// runtime carrier is used. This crate is Plan A (bring-your-own runtime) —
-/// there is no bundled carrier and the runtime requires an explicit config —
-/// so the default is injected whenever no effective `DSH_CORDIS_CONFIG`
-/// exists, regardless of how the runtime was resolved.
-///
-/// `resolved_cwd` must be the absolute, resolved working directory (Python:
-/// `str(Path(cwd).resolve())`).
-///
-/// Returns [`Error::Io`] when the bundled default config cannot be extracted
-/// or verified — the required default-config injection never degrades
-/// silently to a config-less launch; [`crate::DeepSeekHarness::start`]
-/// propagates the failure.
-pub fn compose_env(config: &Config, resolved_cwd: &Path) -> Result<Vec<(String, String)>, Error> {
-    compose_env_with(config, resolved_cwd, env_var_non_empty)
+/// The crate never writes `DSH_CORDIS_CONFIG`, `DSH_SESSION_ROOT`, or
+/// `DSH_CWD` — none has a reader upstream (spec §4.2).
+pub fn compose_env(config: &Config) -> Result<Vec<(String, String)>, Error> {
+    compose_env_with(config, env_var_non_empty)
 }
 
 /// `compose_env` with an injectable parent-environment lookup (a test seam;
 /// see [`resolve_runtime_with`]).
 fn compose_env_with(
     config: &Config,
-    resolved_cwd: &Path,
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Result<Vec<(String, String)>, Error> {
-    // Python `env = dict(self.config.env)`: caller extra env first. An
-    // empty-string `DSH_CORDIS_CONFIG` is skipped on copy — the documented
-    // truthiness rule treats empty as absent, so the empty pair must not
-    // clobber a non-empty parent value at spawn (the resolution below
-    // already treats it as absent for the injection decision).
-    let mut envs: Vec<(String, String)> = Vec::new();
+    // The resolved home is injected first so the caller's Config::env wins
+    // on collision (later entry wins at spawn).
+    let mut envs = vec![("DSH_HOME".to_string(), resolve_dsh_home(config, &lookup))];
     if let Some(extra) = &config.env {
         envs.extend(
             extra
                 .iter()
-                .filter(|(key, value)| !(*key == "DSH_CORDIS_CONFIG" && value.is_empty()))
                 .map(|(key, value)| (key.clone(), value.clone())),
         );
-    }
-    // ...then the SDK keys, so they win on collision (later entry wins).
-    // DSH_CWD is always injected from the resolved working directory.
-    envs.push((
-        "DSH_CWD".to_string(),
-        resolved_cwd.to_string_lossy().into_owned(),
-    ));
-    if let Some(root) = &config.session_root {
-        envs.push(("DSH_SESSION_ROOT".to_string(), root.clone()));
-    }
-    // DSH_CORDIS_CONFIG, Python-parity truthiness: a non-empty
-    // Config::cordis_config wins; otherwise a non-empty value already in the
-    // set (Config::env) or in the parent environment is inherited as-is —
-    // empty strings count as absent, in which case the bundled default is
-    // injected (deliberate Plan A divergence, documented on `compose_env`).
-    match config
-        .cordis_config
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    {
-        Some(path) => envs.push(("DSH_CORDIS_CONFIG".to_string(), path.to_string())),
-        None => {
-            let inherited = config
-                .env
-                .as_ref()
-                .and_then(|extra| extra.get("DSH_CORDIS_CONFIG"))
-                .filter(|value| !value.is_empty())
-                .cloned()
-                .or_else(|| lookup("DSH_CORDIS_CONFIG").filter(|value| !value.is_empty()));
-            if inherited.is_none() {
-                // The bundled default is required when no effective config
-                // exists; an extraction/verification failure propagates
-                // (fail-visible — no silent config-less launch).
-                let default = bundled_default_config_path()?;
-                envs.push((
-                    "DSH_CORDIS_CONFIG".to_string(),
-                    default.to_string_lossy().into_owned(),
-                ));
-            }
-        }
     }
     if let Some(url) = &config.base_url {
         envs.push(("DEEPSEEK_BASE_URL".to_string(), url.clone()));
@@ -346,41 +294,30 @@ fn compose_env_with(
     Ok(envs)
 }
 
-/// Path of the SDK-bundled default runtime configuration
-/// (`assets/cordis.yml`, a byte-identical copy of the official DSH default),
-/// extracted into the system temp directory on first use.
+/// Resolve the harness home: a non-empty `$DSH_HOME` (first from
+/// `Config::env`, then the parent environment), else `~/.dsh` (upstream
+/// `resolveDshHome`, `packages/util/home-paths/src/index.ts:87-91`).
+/// Blank/whitespace-only counts as unset, exactly as upstream does
+/// (`packages/util/home-paths/src/index.ts:88-89`).
 ///
-/// The path is cached for the process lifetime, but the file is **byte
-/// verified against the `include_bytes!` source on every use**: a missing,
-/// unreadable, or mismatched file (e.g. a locally poisoned file at the
-/// deterministic temp path on a shared machine, or a temp cleaner removing
-/// the file between launches) triggers an atomic re-extraction. The write is
-/// atomic (unique temp sibling + rename), so the destination only ever
-/// appears via rename and is always complete. On a sticky temp dir a foreign
-/// file cannot be renamed over — the [`Error::Io`] propagates (fail-visible,
-/// never a config-less launch).
-pub fn bundled_default_config_path() -> Result<PathBuf, Error> {
-    let path: &Path = &DEFAULT_CONFIG_PATH;
-    // Byte-verify any existing file against the include_bytes! source on
-    // every use: the deterministic temp path is world-writable on shared
-    // machines, so an unverified file could be a locally poisoned config
-    // injected into a process holding DEEPSEEK_API_KEY. An unreadable file
-    // counts as unverified too.
-    let verified = std::fs::read(path).is_ok_and(|bytes| bytes == DEFAULT_CORDIS_YML);
-    if !verified {
-        // Write to a unique temp sibling and rename (atomic) so a crashed
-        // writer can never leave a truncated config behind, and concurrent
-        // first-use extractions never collide on the temp path. The
-        // destination only ever appears via rename, so it is always complete.
-        let tmp = path.with_extension(format!(
-            "tmp-{}-{}",
-            std::process::id(),
-            EXTRACT_TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::write(&tmp, DEFAULT_CORDIS_YML).map_err(Error::Io)?;
-        std::fs::rename(&tmp, path).map_err(Error::Io)?;
-    }
-    Ok(path.to_path_buf())
+/// The `Config::dsh_home` first rule, absolute/`~` normalization, directory
+/// creation, and the public accessor land with the resolution helper in the
+/// Config surface task (spec §3.2).
+fn resolve_dsh_home(config: &Config, lookup: &impl Fn(&str) -> Option<String>) -> String {
+    config
+        .env
+        .as_ref()
+        .and_then(|extra| extra.get("DSH_HOME"))
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+        .or_else(|| lookup("DSH_HOME").filter(|value| !value.trim().is_empty()))
+        .unwrap_or_else(|| {
+            std::env::home_dir()
+                .map(|home| home.join(".dsh"))
+                .unwrap_or_else(|| PathBuf::from(".dsh"))
+                .to_string_lossy()
+                .into_owned()
+        })
 }
 
 /// Read a non-empty parent-environment variable, or `None` when unset or
@@ -393,7 +330,8 @@ fn env_var_non_empty(name: &str) -> Option<String> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::path::Path;
+    use std::ffi::OsString;
+    use std::path::PathBuf;
 
     /// Test lookup from a fixed map; keeps unit tests free of process-global
     /// env mutation (and thus race-free under parallel `cargo test`).
@@ -403,43 +341,103 @@ mod tests {
         move |name| env.get(name).map(|value| value.to_string())
     }
 
-    // --- resolve_runtime: precedence matrix -------------------------------
+    /// A unique temp directory for patch-resolution tests (real files:
+    /// patch paths are canonicalized absolute before spawn).
+    fn temp_patch_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "dsh-sdk-patch-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // --- resolve_runtime: launch grammar + AC10 ---------------------------
 
     #[test]
-    fn resolve_launch_args_override_wins_verbatim_over_bin_and_env() {
+    fn resolve_default_launch_argv_is_exactly_profile_sdk() {
         let env: HashMap<&'static str, &'static str> =
-            HashMap::from([("DSH_RUNTIME_BIN", "env-bin")]);
-        let config = Config {
-            runtime_bin: Some("config-bin".into()),
-            launch_args_override: Some(vec![
-                "/usr/local/bin/dsh-run".into(),
-                "--debug".into(),
-                "serve".into(),
-            ]),
-            ..Config::default()
-        };
+            HashMap::from([("DSH_RUNTIME_BIN", "/usr/local/bin/dsh")]);
+        let launch = resolve_runtime_with(&Config::default(), lookup(&env)).unwrap();
+        assert_eq!(launch.program, PathBuf::from("/usr/local/bin/dsh"));
         assert_eq!(
-            resolve_runtime_with(&config, lookup(&env)).unwrap(),
-            RuntimeLaunch {
-                program: "/usr/local/bin/dsh-run".into(),
-                args: vec!["--debug".into(), "serve".into()],
-            }
+            launch.args,
+            vec![OsString::from("--profile"), OsString::from("sdk")],
+            "the default launch argv must be exactly --profile sdk"
         );
     }
 
     #[test]
-    fn resolve_runtime_bin_wins_over_env() {
+    fn resolve_patches_produce_ordered_abs_patch_pairs() {
+        let dir = temp_patch_dir();
+        let first = dir.join("first.yml");
+        let second = dir.join("second.yml");
+        std::fs::write(&first, "").unwrap();
+        std::fs::write(&second, "").unwrap();
+        let env: HashMap<&'static str, &'static str> = HashMap::from([("DSH_RUNTIME_BIN", "dsh")]);
+        let config = Config {
+            patches: vec![first.clone(), second.clone()],
+            ..Config::default()
+        };
+        let launch = resolve_runtime_with(&config, lookup(&env)).unwrap();
+        assert_eq!(
+            launch.args,
+            vec![
+                OsString::from("--profile"),
+                OsString::from("sdk"),
+                OsString::from("--patch"),
+                first.canonicalize().unwrap().into_os_string(),
+                OsString::from("--patch"),
+                second.canonicalize().unwrap().into_os_string(),
+            ],
+            "patches must follow the profile pair as ordered --patch <abs> pairs"
+        );
+        // A relative patch is resolved absolute before spawn too.
+        let config = Config {
+            patches: vec![PathBuf::from("Cargo.toml")],
+            ..Config::default()
+        };
+        let launch = resolve_runtime_with(&config, lookup(&env)).unwrap();
+        let expected = PathBuf::from("Cargo.toml").canonicalize().unwrap();
+        assert!(expected.is_absolute());
+        assert_eq!(launch.args[3], expected.into_os_string());
+    }
+
+    #[test]
+    fn resolve_empty_profile_is_rejected_locally() {
+        let env: HashMap<&'static str, &'static str> = HashMap::from([("DSH_RUNTIME_BIN", "dsh")]);
+        for profile in ["", "   "] {
+            let config = Config {
+                profile: profile.to_string(),
+                ..Config::default()
+            };
+            assert!(
+                matches!(
+                    resolve_runtime_with(&config, lookup(&env)),
+                    Err(Error::Config(_))
+                ),
+                "an empty/blank profile must be rejected locally before spawn"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_dsh_bin_wins_over_env() {
         let env: HashMap<&'static str, &'static str> =
             HashMap::from([("DSH_RUNTIME_BIN", "env-bin")]);
         let config = Config {
-            runtime_bin: Some("config-bin".into()),
+            dsh_bin: Some("config-bin".into()),
             ..Config::default()
         };
         assert_eq!(
             resolve_runtime_with(&config, lookup(&env)).unwrap(),
             RuntimeLaunch {
-                program: "config-bin".into(),
-                args: vec![]
+                program: PathBuf::from("config-bin"),
+                args: vec![OsString::from("--profile"), OsString::from("sdk")],
             }
         );
     }
@@ -451,30 +449,31 @@ mod tests {
         assert_eq!(
             resolve_runtime_with(&Config::default(), lookup(&env)).unwrap(),
             RuntimeLaunch {
-                program: "env-bin".into(),
-                args: vec![]
+                program: PathBuf::from("env-bin"),
+                args: vec![OsString::from("--profile"), OsString::from("sdk")],
             }
         );
     }
 
     #[test]
-    fn resolve_empty_override_and_env_bin_count_as_absent() {
-        // empty launch_args_override falls through to runtime_bin (Python
-        // truthiness)...
-        let empty_env = HashMap::new();
+    fn resolve_empty_dsh_bin_and_env_bin_count_as_absent() {
+        // An empty Config::dsh_bin is falsy (Python truthiness) → the parent
+        // DSH_RUNTIME_BIN route applies...
+        let env: HashMap<&'static str, &'static str> =
+            HashMap::from([("DSH_RUNTIME_BIN", "env-bin")]);
         let config = Config {
-            runtime_bin: Some("config-bin".into()),
-            launch_args_override: Some(vec![]),
+            dsh_bin: Some("".into()),
             ..Config::default()
         };
         assert_eq!(
-            resolve_runtime_with(&config, lookup(&empty_env)).unwrap(),
+            resolve_runtime_with(&config, lookup(&env)).unwrap(),
             RuntimeLaunch {
-                program: "config-bin".into(),
-                args: vec![]
+                program: PathBuf::from("env-bin"),
+                args: vec![OsString::from("--profile"), OsString::from("sdk")],
             }
         );
         // ...and an empty DSH_RUNTIME_BIN counts as absent → RuntimeNotFound
+        // (never an unlaunchable empty program).
         let env: HashMap<&'static str, &'static str> = HashMap::from([("DSH_RUNTIME_BIN", "")]);
         assert!(matches!(
             resolve_runtime_with(&Config::default(), lookup(&env)),
@@ -512,34 +511,66 @@ mod tests {
     // --- compose_env ------------------------------------------------------
 
     #[test]
-    fn compose_env_exact_set_when_all_configured() {
+    fn compose_env_contains_dsh_home_and_never_forbidden_keys() {
+        let env: HashMap<&'static str, &'static str> = HashMap::from([("DSH_HOME", "/home/sdk")]);
+        let map: HashMap<_, _> = compose_env_with(&Config::default(), lookup(&env))
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert_eq!(map.get("DSH_HOME").map(String::as_str), Some("/home/sdk"));
+        for forbidden in ["DSH_CORDIS_CONFIG", "DSH_SESSION_ROOT", "DSH_CWD"] {
+            assert!(
+                !map.contains_key(forbidden),
+                "{forbidden} must never be written into the child env: {map:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn compose_env_falls_back_to_default_home_when_nothing_set() {
+        let empty_env = HashMap::new();
+        let map: HashMap<_, _> = compose_env_with(&Config::default(), lookup(&empty_env))
+            .unwrap()
+            .into_iter()
+            .collect();
+        let home = map.get("DSH_HOME").expect("a home always resolves");
+        assert!(
+            !home.trim().is_empty(),
+            "the resolved home must be non-empty: {map:?}"
+        );
+    }
+
+    #[test]
+    fn compose_env_caller_env_wins_over_injected_dsh_home() {
+        let env: HashMap<&'static str, &'static str> =
+            HashMap::from([("DSH_HOME", "/inherited/home")]);
+        let config = Config {
+            env: Some(HashMap::from([("DSH_HOME".into(), "/caller/home".into())])),
+            ..Config::default()
+        };
+        let map: HashMap<_, _> = compose_env_with(&config, lookup(&env))
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert_eq!(
+            map.get("DSH_HOME").map(String::as_str),
+            Some("/caller/home"),
+            "the caller's Config::env must win over the injected DSH_HOME"
+        );
+    }
+
+    #[test]
+    fn compose_env_injects_deepseek_keys_when_configured() {
         let empty_env = HashMap::new();
         let config = Config {
-            session_root: Some("/sessions".into()),
-            cordis_config: Some("/cfg/cordis.yml".into()),
             base_url: Some("https://api.example".into()),
             api_key: Some("sk-test".into()),
             ..Config::default()
         };
-        let map: HashMap<_, _> =
-            compose_env_with(&config, Path::new("/work/dir"), lookup(&empty_env))
-                .unwrap()
-                .into_iter()
-                .collect();
-        assert_eq!(
-            map.len(),
-            5,
-            "exactly the applicable override keys: {map:?}"
-        );
-        assert_eq!(map.get("DSH_CWD").map(String::as_str), Some("/work/dir"));
-        assert_eq!(
-            map.get("DSH_SESSION_ROOT").map(String::as_str),
-            Some("/sessions")
-        );
-        assert_eq!(
-            map.get("DSH_CORDIS_CONFIG").map(String::as_str),
-            Some("/cfg/cordis.yml")
-        );
+        let map: HashMap<_, _> = compose_env_with(&config, lookup(&empty_env))
+            .unwrap()
+            .into_iter()
+            .collect();
         assert_eq!(
             map.get("DEEPSEEK_BASE_URL").map(String::as_str),
             Some("https://api.example")
@@ -551,198 +582,24 @@ mod tests {
     }
 
     #[test]
-    fn compose_env_omits_unconfigured_and_injects_default_when_absent() {
-        let empty_env = HashMap::new();
-        let map: HashMap<_, _> = compose_env_with(
-            &Config::default(),
-            Path::new("/work/dir"),
-            lookup(&empty_env),
-        )
-        .unwrap()
-        .into_iter()
-        .collect();
-        assert_eq!(
-            map.len(),
-            2,
-            "only DSH_CWD + injected default config: {map:?}"
-        );
-        assert_eq!(map.get("DSH_CWD").map(String::as_str), Some("/work/dir"));
-        let default_path = bundled_default_config_path().unwrap();
-        assert_eq!(
-            map.get("DSH_CORDIS_CONFIG").map(String::as_str),
-            Some(default_path.to_str().unwrap())
-        );
-    }
-
-    #[test]
-    fn compose_env_inherits_parent_cordis_config_without_override_or_default() {
-        let env: HashMap<&'static str, &'static str> =
-            HashMap::from([("DSH_CORDIS_CONFIG", "/inherited/cordis.yml")]);
-        let map: HashMap<_, _> =
-            compose_env_with(&Config::default(), Path::new("/work/dir"), lookup(&env))
-                .unwrap()
-                .into_iter()
-                .collect();
-        assert_eq!(
-            map.len(),
-            1,
-            "inherited config is not part of the override set: {map:?}"
-        );
-        assert_eq!(map.get("DSH_CWD").map(String::as_str), Some("/work/dir"));
-    }
-
-    #[test]
-    fn compose_env_empty_cordis_counts_absent_in_parent_env() {
-        let env: HashMap<&'static str, &'static str> = HashMap::from([("DSH_CORDIS_CONFIG", "")]);
-        let map: HashMap<_, _> =
-            compose_env_with(&Config::default(), Path::new("/work/dir"), lookup(&env))
-                .unwrap()
-                .into_iter()
-                .collect();
-        let default_path = bundled_default_config_path().unwrap();
-        assert_eq!(
-            map.get("DSH_CORDIS_CONFIG").map(String::as_str),
-            Some(default_path.to_str().unwrap()),
-            "empty inherited DSH_CORDIS_CONFIG counts as absent: {map:?}"
-        );
-    }
-
-    #[test]
-    fn compose_env_empty_config_cordis_counts_absent() {
+    fn compose_env_user_env_flows_through() {
         let empty_env = HashMap::new();
         let config = Config {
-            cordis_config: Some("".into()),
-            ..Config::default()
-        };
-        let map: HashMap<_, _> =
-            compose_env_with(&config, Path::new("/work/dir"), lookup(&empty_env))
-                .unwrap()
-                .into_iter()
-                .collect();
-        let default_path = bundled_default_config_path().unwrap();
-        assert_eq!(
-            map.get("DSH_CORDIS_CONFIG").map(String::as_str),
-            Some(default_path.to_str().unwrap()),
-            "empty Config::cordis_config counts as absent: {map:?}"
-        );
-    }
-
-    #[test]
-    fn compose_env_empty_user_env_cordis_counts_absent() {
-        let empty_env = HashMap::new();
-        let config = Config {
-            env: Some(HashMap::from([("DSH_CORDIS_CONFIG".into(), "".into())])),
-            ..Config::default()
-        };
-        let map: HashMap<_, _> =
-            compose_env_with(&config, Path::new("/work/dir"), lookup(&empty_env))
-                .unwrap()
-                .into_iter()
-                .collect();
-        let default_path = bundled_default_config_path().unwrap();
-        assert_eq!(
-            map.get("DSH_CORDIS_CONFIG").map(String::as_str),
-            Some(default_path.to_str().unwrap()),
-            "empty user-env DSH_CORDIS_CONFIG counts as absent: {map:?}"
-        );
-    }
-
-    #[test]
-    fn compose_env_empty_user_env_cordis_does_not_clobber_parent_value() {
-        // An empty-string DSH_CORDIS_CONFIG in Config::env counts as absent
-        // (truthiness): it must be skipped on copy so the parent's non-empty
-        // value survives the override set instead of being clobbered by an
-        // empty pair at spawn. The injection decision (no effective config)
-        // is unchanged — the parent value is inherited, so no default is
-        // injected either.
-        let env: HashMap<&'static str, &'static str> =
-            HashMap::from([("DSH_CORDIS_CONFIG", "/parent/cordis.yml")]);
-        let config = Config {
-            env: Some(HashMap::from([("DSH_CORDIS_CONFIG".into(), "".into())])),
-            ..Config::default()
-        };
-        let map: HashMap<_, _> = compose_env_with(&config, Path::new("/work/dir"), lookup(&env))
-            .unwrap()
-            .into_iter()
-            .collect();
-        assert!(
-            !map.contains_key("DSH_CORDIS_CONFIG"),
-            "no empty DSH_CORDIS_CONFIG pair may be emitted; the parent value must be inherited instead: {map:?}"
-        );
-    }
-
-    #[test]
-    fn compose_env_user_env_flows_through_and_sdk_keys_win() {
-        let empty_env = HashMap::new();
-        let config = Config {
-            api_key: Some("sdk-key".into()),
-            cordis_config: Some("/cfg.yml".into()),
             env: Some(HashMap::from([
                 ("FOO".into(), "bar".into()),
-                ("DSH_CWD".into(), "user-cwd".into()),
                 ("DEEPSEEK_API_KEY".into(), "user-key".into()),
-                ("DSH_CORDIS_CONFIG".into(), "/user.yml".into()),
             ])),
             ..Config::default()
         };
-        let map: HashMap<_, _> =
-            compose_env_with(&config, Path::new("/work/dir"), lookup(&empty_env))
-                .unwrap()
-                .into_iter()
-                .collect();
+        let map: HashMap<_, _> = compose_env_with(&config, lookup(&empty_env))
+            .unwrap()
+            .into_iter()
+            .collect();
         assert_eq!(map.get("FOO").map(String::as_str), Some("bar"));
-        assert_eq!(map.get("DSH_CWD").map(String::as_str), Some("/work/dir"));
         assert_eq!(
             map.get("DEEPSEEK_API_KEY").map(String::as_str),
-            Some("sdk-key")
-        );
-        assert_eq!(
-            map.get("DSH_CORDIS_CONFIG").map(String::as_str),
-            Some("/cfg.yml")
-        );
-    }
-
-    // --- bundled_default_config_path -------------------------------------
-
-    #[test]
-    fn bundled_default_config_is_extracted_byte_verified_and_recreated() {
-        // First use extracts to a readable temp file byte-identical to the
-        // include_bytes! source. (Sequenced in one test: the temp file is
-        // shared process state, so a parallel test mutating it would race.)
-        let first = bundled_default_config_path().unwrap();
-        assert!(
-            first.is_file(),
-            "extracted default config must be a readable file"
-        );
-        assert_eq!(
-            std::fs::read(&first).unwrap(),
-            DEFAULT_CORDIS_YML,
-            "must be byte-identical to assets/cordis.yml"
-        );
-        // Subsequent calls reuse the same cached path.
-        let second = bundled_default_config_path().unwrap();
-        assert_eq!(first, second, "subsequent calls reuse the same cached path");
-        // A temp cleaner removing the file between launches re-extracts.
-        std::fs::remove_file(&first).unwrap();
-        let third = bundled_default_config_path().unwrap();
-        assert_eq!(first, third);
-        assert!(
-            third.is_file(),
-            "re-extracts when a temp cleaner removed the file"
-        );
-        assert_eq!(std::fs::read(&third).unwrap(), DEFAULT_CORDIS_YML);
-        // A locally poisoned file at the deterministic temp path (the qc3
-        // W-2 threat model: world-writable temp dir on shared machines) is
-        // detected by the byte verification on the next use and atomically
-        // re-extracted, so the injected config is always the SDK's own
-        // asset.
-        std::fs::write(&first, b"attacker-controlled cordis.yml").unwrap();
-        let fourth = bundled_default_config_path().unwrap();
-        assert_eq!(first, fourth);
-        assert_eq!(
-            std::fs::read(&fourth).unwrap(),
-            DEFAULT_CORDIS_YML,
-            "a mismatched cached file must be re-extracted (byte-verified)"
+            Some("user-key"),
+            "caller env entries flow through verbatim"
         );
     }
 
@@ -771,33 +628,5 @@ mod tests {
             rendered.contains("<redacted>"),
             "the redaction marker must be visible: {rendered}"
         );
-    }
-
-    // --- resolve_runtime: empty runtime_bin fallthrough -------------------
-
-    #[test]
-    fn resolve_empty_runtime_bin_counts_as_absent_and_falls_through_to_env() {
-        // runtime_bin: Some("") is falsy (Python truthiness) → the parent
-        // DSH_RUNTIME_BIN route applies...
-        let env: HashMap<&'static str, &'static str> =
-            HashMap::from([("DSH_RUNTIME_BIN", "env-bin")]);
-        let config = Config {
-            runtime_bin: Some("".into()),
-            ..Config::default()
-        };
-        assert_eq!(
-            resolve_runtime_with(&config, lookup(&env)).unwrap(),
-            RuntimeLaunch {
-                program: "env-bin".into(),
-                args: vec![]
-            }
-        );
-        // ...and with no env either, the empty bin still counts as absent →
-        // RuntimeNotFound (never an unlaunchable empty program).
-        let empty_env = HashMap::new();
-        assert!(matches!(
-            resolve_runtime_with(&config, lookup(&empty_env)),
-            Err(Error::RuntimeNotFound(_))
-        ));
     }
 }

@@ -7,6 +7,7 @@
 //! requests, so the same harness serves any client-level scenario.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -44,16 +45,13 @@ pub fn sleep_forever_bin() -> &'static str {
 /// A [`LaunchSpec`] running the fake-runtime peer against `script`.
 ///
 /// The scenario is written to a unique temp file and passed via
-/// `--script-file` (never inline argv — a large scenario exceeds the Linux
+/// `--patch <path>` (never inline argv — a large scenario exceeds the Linux
 /// single-argument limit; see [`write_script_file`]).
 pub fn fake_runtime_spec(script: &[Directive]) -> Result<LaunchSpec, serde_json::Error> {
     let script_path = write_script_file(script)?;
     Ok(LaunchSpec {
-        program: fake_runtime_bin().to_string(),
-        args: vec![
-            "--script-file".to_string(),
-            script_path.to_string_lossy().into_owned(),
-        ],
+        program: PathBuf::from(fake_runtime_bin()),
+        args: vec![OsString::from("--patch"), script_path.into_os_string()],
         envs: HashMap::new(),
         cwd: None,
     })
@@ -99,16 +97,14 @@ pub fn test_session_root() -> PathBuf {
 /// peer against `script`: Python-parity defaults, the suite's fast
 /// close-ladder timeouts, and the suite's session root.
 ///
-/// Like [`fake_runtime_spec`], the scenario is passed via `--script-file`
-/// (temp file), never inline argv.
+/// The fake runtime is launched through the real launch model — `dsh_bin`
+/// names the fixture and the scenario path rides as a `--patch` (temp file,
+/// never inline argv; see [`write_script_file`]).
 pub fn harness_config(script: &[Directive]) -> Result<Config, serde_json::Error> {
     let script_path = write_script_file(script)?;
     Ok(Config {
-        launch_args_override: Some(vec![
-            fake_runtime_bin().to_string(),
-            "--script-file".to_string(),
-            script_path.to_string_lossy().into_owned(),
-        ]),
+        dsh_bin: Some(fake_runtime_bin().to_string()),
+        patches: vec![script_path],
         timeouts: test_timeouts(),
         session_root: Some(test_session_root().to_string_lossy().into_owned()),
         ..Config::default()

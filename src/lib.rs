@@ -32,25 +32,17 @@
 //!
 //! # Environment injection
 //!
-//! [`DeepSeekHarness::start`] injects `DSH_CWD` always, and
-//! `DSH_SESSION_ROOT`, `DSH_CORDIS_CONFIG`, `DEEPSEEK_BASE_URL` /
-//! `DEEPSEEK_API_KEY` only when configured — each override wins over any
-//! inherited value (Python `dict.update` semantics), and the parent
-//! environment is otherwise inherited wholesale. With no effective
-//! `DSH_CORDIS_CONFIG` the SDK injects a bundled copy of the runtime's
-//! default `cordis.yml`.
-//!
-//! **Deliberate divergence from the Python SDK** (documented; do not "fix"
-//! to match Python): the Python SDK injects its bundled default only when
-//! the bundled runtime carrier is used. This crate is bring-your-own runtime
-//! (Plan A) — there is no bundled carrier — so the default is injected
-//! whenever no effective config exists, regardless of how the runtime binary
-//! was resolved.
+//! [`DeepSeekHarness::start`] boots the runtime under the configured
+//! `profile` (`dsh --profile <name> [--patch <path>]...`) and injects the
+//! resolved `DSH_HOME`, the caller's `Config::env` entries, and
+//! `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` when configured; the parent
+//! environment is otherwise inherited wholesale. The crate never writes
+//! `DSH_CORDIS_CONFIG`, `DSH_SESSION_ROOT`, or `DSH_CWD` — none has a
+//! reader upstream.
 //!
 //! The runtime binary is bring-your-own (Plan A): [`DeepSeekHarness::start`]
-//! resolves it from `Config::runtime_bin` / `launch_args_override` or the
-//! `DSH_RUNTIME_BIN` environment variable. This crate never downloads or
-//! bundles a runtime — see
+//! resolves it from `Config::dsh_bin` or the `DSH_RUNTIME_BIN` environment
+//! variable. This crate never downloads or bundles a runtime — see
 //! <https://github.com/deepseek-ai/deepseek-harness> for the official runtime
 //! and its sources.
 //!

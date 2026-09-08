@@ -45,6 +45,12 @@ pub enum Error {
     #[error("runtime is missing or not launchable: {0}")]
     RuntimeNotFound(String),
 
+    /// A configuration error: the caller's [`Config`](crate::runtime::Config)
+    /// cannot launch a runtime (e.g. an empty `profile`), rejected locally
+    /// before spawn (spec §2.2.6).
+    #[error("invalid configuration: {0}")]
+    Config(String),
+
     /// An I/O error (spawn, stdio, transport).
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -131,6 +137,15 @@ mod tests {
     }
 
     #[test]
+    fn display_config() {
+        let err = Error::Config("profile must not be empty".into());
+        assert_eq!(
+            err.to_string(),
+            "invalid configuration: profile must not be empty"
+        );
+    }
+
+    #[test]
     fn display_io_is_transparent() {
         let source = std::io::Error::new(std::io::ErrorKind::NotFound, "boom");
         let err = Error::Io(source);
@@ -164,6 +179,7 @@ mod tests {
         }
         .is_protocol());
         assert!(!Error::RuntimeNotFound("x".into()).is_protocol());
+        assert!(!Error::Config("x".into()).is_protocol());
         assert!(!Error::Io(std::io::Error::other("io")).is_protocol());
         assert!(!Error::Json(serde_json::from_str::<Value>("x").unwrap_err()).is_protocol());
     }

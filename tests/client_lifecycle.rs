@@ -7,6 +7,7 @@
 
 mod common;
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use deepseek_harness_sdk::{ClientTimeouts, ContentBlock, Error, HarnessClient, LaunchSpec};
@@ -446,7 +447,7 @@ async fn close_ladder_level_one_cooperative_shutdown_and_exit() {
 #[tokio::test]
 async fn close_ladder_escalates_to_sigterm_when_peer_ignores_shutdown_and_eof() {
     let spec = LaunchSpec {
-        program: sleep_forever_bin().to_string(),
+        program: PathBuf::from(sleep_forever_bin()),
         args: vec![],
         envs: Default::default(),
         cwd: None,
@@ -473,7 +474,7 @@ async fn spawn_failures_map_to_typed_errors() {
 
     // Missing program: ENOENT -> RuntimeNotFound.
     let spec = LaunchSpec {
-        program: "/definitely/not/a/deepseek/runtime".into(),
+        program: PathBuf::from("/definitely/not/a/deepseek/runtime"),
         args: vec![],
         envs: Default::default(),
         cwd: None,
@@ -487,7 +488,7 @@ async fn spawn_failures_map_to_typed_errors() {
     // A program that exists but cannot be launched (a directory is not
     // executable) is a plain spawn I/O error, not a NotFound.
     let spec = LaunchSpec {
-        program: std::env::temp_dir().to_string_lossy().into_owned(),
+        program: std::env::temp_dir(),
         args: vec![],
         envs: Default::default(),
         cwd: None,
