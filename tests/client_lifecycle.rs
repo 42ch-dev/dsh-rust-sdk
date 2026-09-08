@@ -369,8 +369,14 @@ async fn initialize_timeout_bounds_handshake() {
         "the bound must fire promptly, not hang"
     );
     match &err {
-        Error::RequestTimeout { method, .. } => {
+        Error::RequestTimeout {
+            method, profile, ..
+        } => {
             assert_eq!(method, "initialize");
+            assert_eq!(
+                profile, &None,
+                "the low-level path has no profile context, so the field must be None (spec §7)"
+            );
         }
         other => panic!("expected RequestTimeout, got {other:?}"),
     }
@@ -397,10 +403,17 @@ async fn start_bounds_initialize_handshake_via_config() {
         "start() must not hang on a wedged handshake"
     );
     match &err {
-        Error::RequestTimeout { method, .. } => {
+        Error::RequestTimeout {
+            method, profile, ..
+        } => {
             assert_eq!(
                 method, "initialize",
                 "the method must stay the exact wire method name (spec §7): {method}"
+            );
+            assert_eq!(
+                profile.as_deref(),
+                Some("sdk"),
+                "the high-level path must carry the selected profile (spec §7)"
             );
             assert!(
                 err.to_string().contains("selected dsh profile 'sdk'"),

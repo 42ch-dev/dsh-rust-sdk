@@ -14,7 +14,7 @@ use tokio::sync::{broadcast, oneshot, Notify};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::error::{Error, SelectedProfile, TimeoutSource};
+use crate::error::Error;
 use crate::protocol::{
     ContentBlock, InitializeParams, InitializeResult, Notification, SessionPromptParams,
     SessionPromptResult,
@@ -256,13 +256,8 @@ impl HarnessClient {
     /// unknown ids are dropped. When the runtime is already dead (or spawn
     /// failed), fails fast with the exit code and captured stderr tail.
     pub async fn request(&self, method: &str, params: Option<Value>) -> Result<Value, Error> {
-        self.request_with_timeout(
-            method,
-            params,
-            self.timeouts.request_timeout,
-            SelectedProfile::default(),
-        )
-        .await
+        self.request_with_timeout(method, params, self.timeouts.request_timeout, None)
+            .await
     }
 
     /// [`HarnessClient::request`] with an explicit response deadline and
@@ -275,7 +270,7 @@ impl HarnessClient {
         method: &str,
         params: Option<Value>,
         timeout: Option<Duration>,
-        profile: SelectedProfile,
+        profile: Option<String>,
     ) -> Result<Value, Error> {
         // Fast-fail on a closed or dead runtime, with process context.
         {
@@ -351,11 +346,12 @@ impl HarnessClient {
                     lock(&self.pending).remove(&id);
                     return Err(Error::RequestTimeout {
                         // The method stays the exact wire method name (spec
-                        // §7); the selected profile rides in the source
-                        // carrier's message, or nothing when the timeout
-                        // path has no profile context.
+                        // §7); the selected profile, when the handshake had
+                        // one, rides in the public `profile` field and is
+                        // rendered in the message.
                         method: method.to_string(),
-                        source: TimeoutSource::new(elapsed, profile),
+                        source: elapsed,
+                        profile,
                     });
                 }
             },
@@ -405,15 +401,8 @@ impl HarnessClient {
         reasoning_effort: Option<&str>,
         max_tokens: Option<u32>,
     ) -> Result<InitializeResult, Error> {
-        self.initialize_with_profile(
-            cwd,
-            provider,
-            model,
-            reasoning_effort,
-            max_tokens,
-            SelectedProfile::default(),
-        )
-        .await
+        self.initialize_with_profile(cwd, provider, model, reasoning_effort, max_tokens, None)
+            .await
     }
 
     /// [`HarnessClient::initialize`] with the selected profile threaded to
@@ -430,7 +419,7 @@ impl HarnessClient {
         model: impl Into<String>,
         reasoning_effort: Option<&str>,
         max_tokens: Option<u32>,
-        profile: SelectedProfile,
+        profile: Option<String>,
     ) -> Result<InitializeResult, Error> {
         if max_tokens == Some(0) {
             return Err(Error::SdkProtocol {

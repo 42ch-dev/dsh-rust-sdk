@@ -1,65 +1,21 @@
 use serde_json::Value;
 use std::fmt;
 
-/// The selected DSH profile for a wedged handshake, rendered in the
-/// timeout message Python-style (`selected dsh profile 'sdk'`) when known
-/// (spec §7; Python appends `{profile!r}` —
+/// Renders the selected-profile suffix for the timeout message
+/// Python-style (` (selected dsh profile 'sdk')`) when a profile is
+/// present (spec §7; Python appends `selected dsh profile {profile!r}` —
 /// `python/sdk/src/deepseek_harness/client.py:158-160`).
 ///
-/// A newtype so the thiserror format string can render the parenthetical
-/// suffix conditionally — `Option<String>` has no `Display`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct SelectedProfile(Option<String>);
+/// `Option<String>` has no `Display`, so the thiserror format string
+/// passes the profile through this wrapper as an explicit argument.
+struct ProfileSuffix<'a>(Option<&'a str>);
 
-impl SelectedProfile {
-    /// The profile selected for the launch, named in the timeout message
-    /// Python-style when the handshake wedges (spec §7; Python appends
-    /// `selected dsh profile {profile!r}` —
-    /// `python/sdk/src/deepseek_harness/client.py:158-160`).
-    pub(crate) fn new(profile: impl Into<String>) -> Self {
-        Self(Some(profile.into()))
-    }
-}
-
-impl fmt::Display for SelectedProfile {
+impl fmt::Display for ProfileSuffix<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.0 {
+        match self.0 {
             Some(profile) => write!(f, " (selected dsh profile '{profile}')"),
             None => Ok(()),
         }
-    }
-}
-
-/// The underlying timeout error, optionally naming the selected DSH
-/// profile so a wedged handshake is diagnosable (spec §7; Python appends
-/// `selected dsh profile {profile!r}` —
-/// `python/sdk/src/deepseek_harness/client.py:158-160`).
-///
-/// Crate-private: the public [`Error::RequestTimeout`] variant keeps its
-/// `{ method, source }` shape and `method` stays the exact wire method
-/// name; the profile rides in the rendered message, never in `method`
-/// (plan 06 Task 2 PM interpretation).
-#[derive(Debug)]
-pub(crate) struct TimeoutSource {
-    elapsed: tokio::time::error::Elapsed,
-    profile: SelectedProfile,
-}
-
-impl TimeoutSource {
-    pub(crate) fn new(elapsed: tokio::time::error::Elapsed, profile: SelectedProfile) -> Self {
-        Self { elapsed, profile }
-    }
-}
-
-impl fmt::Display for TimeoutSource {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}", self.elapsed, self.profile)
-    }
-}
-
-impl std::error::Error for TimeoutSource {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.elapsed)
     }
 }
 
@@ -77,24 +33,28 @@ pub enum Error {
     TransportClosed(String),
 
     /// A request did not get a response within the configured timeout.
-    #[error("{method} timed out waiting for DeepSeek Harness runtime: {source}")]
+    ///
+    /// `method` is exactly the wire method name; `profile` names the
+    /// selected DSH profile when the handshake had one, rendered in the
+    /// message so a wedged handshake is diagnosable (spec §7; Python
+    /// appends `selected dsh profile {profile!r}` —
+    /// `python/sdk/src/deepseek_harness/client.py:158-160`).
+    #[error(
+        "{method} timed out waiting for DeepSeek Harness runtime: {source}{}",
+        ProfileSuffix(profile.as_deref()),
+    )]
     RequestTimeout {
         /// The JSON-RPC method that timed out — exactly the wire method
-        /// name (spec §7). The selected profile, when the handshake had
-        /// one, is rendered by the `source` carrier instead, so `method`
-        /// never carries diagnostic prose.
+        /// name (spec §7).
         method: String,
-        /// The underlying timeout error, naming the selected profile when
-        /// the handshake had one (spec §7; Python appends
-        /// `selected dsh profile {profile!r}` —
-        /// `python/sdk/src/deepseek_harness/client.py:158-160`).
-        ///
-        /// The carrier is crate-private; the public variant shape stays
-        /// `{ method, source }` (plan 06 Task 2 PM interpretation), so the
-        /// field deliberately suppresses the `private_interfaces` lint.
+        /// The underlying timeout error.
         #[source]
-        #[allow(private_interfaces)]
-        source: TimeoutSource,
+        source: tokio::time::error::Elapsed,
+        /// The selected DSH profile for the launch, when the handshake
+        /// had one, named in the rendered message (spec §7; Python
+        /// appends `selected dsh profile {profile!r}` —
+        /// `python/sdk/src/deepseek_harness/client.py:158-160`).
+        profile: Option<String>,
     },
 
     /// A protocol-level violation: the runtime's behavior contradicts the
@@ -148,7 +108,7 @@ impl Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{Error, SelectedProfile, TimeoutSource};
+    use super::Error;
     use serde_json::{json, Value};
     use std::time::Duration;
 
@@ -173,7 +133,8 @@ mod tests {
     async fn display_request_timeout() {
         let err = Error::RequestTimeout {
             method: "initialize".into(),
-            source: TimeoutSource::new(elapsed().await, SelectedProfile::default()),
+            source: elapsed().await,
+            profile: None,
         };
         assert_eq!(
             err.to_string(),
@@ -183,14 +144,14 @@ mod tests {
 
     #[tokio::test]
     async fn display_request_timeout_names_profile_in_message() {
-        // The profile is carried in the message, not the variant shape or
-        // the `method` value: the source carrier renders the selected
-        // profile parenthetically (spec §7; Python appends
-        // `selected dsh profile {profile!r}`), while `method` stays the
-        // exact wire method name.
+        // The profile is a public `Option<String>` field (spec §7; Python
+        // appends `selected dsh profile {profile!r}`), rendered in the
+        // message when present, while `method` stays the exact wire method
+        // name.
         let err = Error::RequestTimeout {
             method: "initialize".into(),
-            source: TimeoutSource::new(elapsed().await, SelectedProfile::new("sdk")),
+            source: elapsed().await,
+            profile: Some("sdk".into()),
         };
         assert_eq!(
             err.to_string(),
@@ -265,7 +226,8 @@ mod tests {
         assert!(!Error::TransportClosed("x".into()).is_protocol());
         assert!(!Error::RequestTimeout {
             method: "m".into(),
-            source: TimeoutSource::new(elapsed().await, SelectedProfile::default()),
+            source: elapsed().await,
+            profile: None,
         }
         .is_protocol());
         assert!(!Error::JsonRpc {
