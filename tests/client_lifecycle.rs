@@ -394,14 +394,39 @@ async fn start_bounds_initialize_handshake_via_config() {
         harness_config(&[expect("initialize"), ignore_all()]).expect("serialize script");
     config.initialize_timeout = Some(Duration::from_millis(200));
 
+    // The wall-clock bound is measured on the handshake alone — the
+    // `RequestTimeout` return, before the close ladder — so the timing
+    // assertion is not the tightest in the suite (qc3 S-1). `start()`
+    // runs the close ladder before propagating, so the timing is
+    // measured on the low-level handshake with the same bound the
+    // config carries; the high-level path below locks the error
+    // contract (method, profile, message).
+    let spec = fake_runtime_spec(&[expect("initialize"), ignore_all()]).expect("serialize script");
+    let timeouts = ClientTimeouts {
+        initialize_timeout: config.initialize_timeout,
+        ..test_timeouts()
+    };
+    let mut client = HarnessClient::spawn(spec, timeouts).expect("spawn fake runtime");
     let started = std::time::Instant::now();
+    let low_err = client
+        .initialize("/tmp", "deepseek", "deepseek-chat", None, Some(1024))
+        .await
+        .expect_err("an unanswered initialize must time out");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the bound must fire promptly, not hang"
+    );
+    assert!(
+        matches!(low_err, Error::RequestTimeout { .. }),
+        "unexpected error: {low_err}"
+    );
+    client.close().await.expect("close reaps the ignoring peer");
+
+    // The high-level path: `start()` copies `Config::initialize_timeout`
+    // into the client timeouts and names the selected profile (spec §7).
     let err = DeepSeekHarness::start(config)
         .await
         .expect_err("a wedged handshake must fail start() within the bound");
-    assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "start() must not hang on a wedged handshake"
-    );
     match &err {
         Error::RequestTimeout {
             method, profile, ..
