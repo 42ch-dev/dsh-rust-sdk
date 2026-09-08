@@ -22,11 +22,11 @@
 //! subprocess: the resolved `DSH_HOME` (`Config::dsh_home` → non-empty
 //! `$DSH_HOME` from `Config::env`, then the parent environment, else
 //! `~/.dsh` — upstream `resolveDshHome`,
-//! `packages/util/home-paths/src/index.ts:87-91`), the
+//! `packages/util/home-paths/src/index.ts:87-91`),
+//! `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` when configured, and the
 //! caller's `Config::env` entries (verbatim, except that `DSH_HOME` and
 //! the three forbidden keys of spec §4.2 are filtered out under any
-//! configuration), and `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` when
-//! configured. The caller's `DSH_HOME` is an **input to resolution**
+//! configuration). The caller's `DSH_HOME` is an **input to resolution**
 //! (spec §3.2.1), not a post-resolution override: it is excluded from the
 //! verbatim passthrough, so the child always receives the resolved
 //! absolute, `~`-expanded home (spec §3.2.3). Every other caller key keeps
@@ -45,7 +45,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::client::ClientTimeouts;
+use crate::client::{ClientTimeouts, FORBIDDEN_ENV_KEYS};
 use crate::error::Error;
 
 /// Acquisition hints embedded in [`Error::RuntimeNotFound`] when no runtime
@@ -220,7 +220,11 @@ pub struct RuntimeLaunch {
 /// pair is `--profile <profile>`, then one `--patch <abs path>` pair per
 /// configured patch in caller order, each resolved absolute before spawn
 /// (Python `Path(patch).expanduser().resolve()` —
-/// `python/sdk/src/deepseek_harness/client.py:483-484`). An empty `profile`
+/// `python/sdk/src/deepseek_harness/client.py:483-484`). The resolution is
+/// non-strict (a not-yet-existing patch is still absolutized, exactly like
+/// Python's `resolve()`) and `~`-expanding (Python `expanduser()`); an
+/// empty patch path is rejected locally with [`Error::Config`] (upstream
+/// `apps/cli/src/args.ts:91`). An empty `profile`
 /// is rejected locally with [`Error::Config`] before spawn (spec §2.2.6).
 ///
 /// An empty `dsh_bin` and an empty `DSH_RUNTIME_BIN` both count as absent
@@ -262,34 +266,37 @@ fn resolve_runtime_with(
     for patch in &config.patches {
         // Patch paths are resolved absolute before spawn, matching both
         // references (Python `Path(patch).expanduser().resolve()` —
-        // `python/sdk/src/deepseek_harness/client.py:483-484`).
-        let abs = patch.canonicalize().map_err(Error::Io)?;
+        // `python/sdk/src/deepseek_harness/client.py:483-484`). The
+        // resolution is non-strict (no existence requirement, like Python's
+        // `resolve()`) and `~`-expanding (Python `expanduser()`), so a
+        // `~/overlay.yml` patch or a not-yet-created patch file launches
+        // instead of failing with `Error::Io` before spawn.
+        if patch.as_os_str().is_empty() {
+            return Err(Error::Config(
+                "patch path must not be empty: dsh --patch <path> requires a path".to_string(),
+            ));
+        }
+        let abs = std::path::absolute(expand_home(patch)).map_err(Error::Io)?;
         args.push(OsString::from("--patch"));
         args.push(abs.into_os_string());
     }
     Ok(RuntimeLaunch { program, args })
 }
 
-/// The environment keys the crate MUST never write into the child
-/// environment, under any configuration (spec §4.2). None has a reader
-/// upstream: the bundled `cordis.yml` consuming `DSH_CORDIS_CONFIG` was
-/// deleted, sessions live under `$DSH_HOME/sessions`, and the workspace cwd
-/// reaches the runtime through `initialize.cwd` (spec §4.2 evidence).
-const FORBIDDEN_ENV_KEYS: [&str; 3] = ["DSH_CORDIS_CONFIG", "DSH_SESSION_ROOT", "DSH_CWD"];
-
 /// Compose the environment override set injected into the runtime subprocess.
 ///
 /// Returns exactly the applicable override keys, in a stable order: the
-/// resolved `DSH_HOME` first, then the caller's `Config::env` entries
-/// (verbatim, except that `DSH_HOME` and the three forbidden keys of spec
-/// §4.2 are filtered out under any configuration), then
-/// `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` when configured. The caller's
+/// resolved `DSH_HOME` first, then `DEEPSEEK_BASE_URL` /
+/// `DEEPSEEK_API_KEY` when configured, then the caller's `Config::env`
+/// entries (verbatim, except that `DSH_HOME` and the three forbidden keys
+/// of spec §4.2 are filtered out under any configuration). The caller's
 /// `DSH_HOME` is an **input to resolution** (spec §3.2.1), not a
 /// post-resolution override: excluding it from the passthrough guarantees
 /// the child always receives the resolved absolute, `~`-expanded home
 /// (spec §3.2.3). When any other key appears twice, the later entry wins at
 /// spawn, so the caller's `Config::env` overrides the crate-injected
-/// values on collision (Python `env.update(self.config.env)` ordering —
+/// values on collision — including `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY`
+/// (Python `env.update(self.config.env)` ordering —
 /// `python/sdk/src/deepseek_harness/client.py:75-77`). Every other variable
 /// is inherited wholesale from the parent environment by the spawn layer.
 ///
@@ -305,16 +312,34 @@ fn compose_env_with(
     config: &Config,
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Result<Vec<(String, String)>, Error> {
+    let home = resolve_dsh_home_with(config, &lookup);
+    compose_env_with_home(config, &home)
+}
+
+/// Compose the override set from a **pre-resolved** home, so the value
+/// created/logged at boot and the value injected into the child env are
+/// identical (spec §3.2.3; [`DeepSeekHarness::start`](crate::api::DeepSeekHarness::start)
+/// resolves the home once and passes it here — F7).
+pub(crate) fn compose_env_with_home(
+    config: &Config,
+    home: &Path,
+) -> Result<Vec<(String, String)>, Error> {
     // The resolved home is injected first; `DSH_HOME` is excluded from the
     // caller-env passthrough below (PM resolution 2026-09-08), so no later
     // entry can replace it — the child always receives the resolved
     // absolute, `~`-expanded home.
-    let mut envs = vec![(
-        "DSH_HOME".to_string(),
-        resolve_dsh_home_with(config, &lookup)
-            .to_string_lossy()
-            .into_owned(),
-    )];
+    let mut envs = vec![("DSH_HOME".to_string(), home.to_string_lossy().into_owned())];
+    // `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` are injected BEFORE the
+    // caller entries: the later entry wins at spawn, so the caller's
+    // `Config::env` overrides the crate-injected values on collision
+    // (Python `env.update(self.config.env)` ordering —
+    // `python/sdk/src/deepseek_harness/client.py:75-77`).
+    if let Some(url) = &config.base_url {
+        envs.push(("DEEPSEEK_BASE_URL".to_string(), url.clone()));
+    }
+    if let Some(key) = &config.api_key {
+        envs.push(("DEEPSEEK_API_KEY".to_string(), key.clone()));
+    }
     if let Some(extra) = &config.env {
         envs.extend(
             extra
@@ -332,12 +357,6 @@ fn compose_env_with(
                 })
                 .map(|(key, value)| (key.clone(), value.clone())),
         );
-    }
-    if let Some(url) = &config.base_url {
-        envs.push(("DEEPSEEK_BASE_URL".to_string(), url.clone()));
-    }
-    if let Some(key) = &config.api_key {
-        envs.push(("DEEPSEEK_API_KEY".to_string(), key.clone()));
     }
     Ok(envs)
 }
@@ -367,8 +386,14 @@ impl Config {
 }
 
 /// `Config::resolve_dsh_home` with an injectable parent-environment lookup
-/// (a test seam; see [`resolve_runtime_with`]).
-fn resolve_dsh_home_with(config: &Config, lookup: &impl Fn(&str) -> Option<String>) -> PathBuf {
+/// (a test seam; see [`resolve_runtime_with`]). `pub(crate)` so
+/// [`DeepSeekHarness::start`](crate::api::DeepSeekHarness::start) resolves
+/// the home once from the live environment without snapshotting the whole
+/// parent env (F7).
+pub(crate) fn resolve_dsh_home_with(
+    config: &Config,
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> PathBuf {
     // 1. an explicit configured path (upstream `configured ?? ...`).
     if let Some(home) = &config.dsh_home {
         return normalize_home(home);
@@ -423,8 +448,10 @@ fn expand_home(path: &Path) -> PathBuf {
 }
 
 /// Read a non-empty parent-environment variable, or `None` when unset or
-/// empty (empty string counts as absent — Python truthiness).
-fn env_var_non_empty(name: &str) -> Option<String> {
+/// empty (empty string counts as absent — Python truthiness). `pub(crate)`
+/// so [`DeepSeekHarness::start`](crate::api::DeepSeekHarness::start) can
+/// resolve the home from the live environment (F7).
+pub(crate) fn env_var_non_empty(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
@@ -434,6 +461,7 @@ mod tests {
     use std::collections::HashMap;
     use std::ffi::OsString;
     use std::path::PathBuf;
+    use std::sync::LazyLock;
 
     /// Test lookup from a fixed map; keeps unit tests free of process-global
     /// env mutation (and thus race-free under parallel `cargo test`).
@@ -444,17 +472,26 @@ mod tests {
     }
 
     /// A unique temp directory for patch-resolution tests (real files:
-    /// patch paths are canonicalized absolute before spawn).
+    /// patch paths are resolved absolute before spawn). All cases live
+    /// under one per-process root, and a stale root from a previous run is
+    /// removed best-effort on first use, so the system temp dir never holds
+    /// more than one run's artifacts (F6).
     fn temp_patch_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "dsh-sdk-patch-test-{}-{}",
-            std::process::id(),
+        static ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
+            let root =
+                std::env::temp_dir().join(format!("dsh-sdk-patch-tests-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).expect("create the patch-test temp root");
+            root
+        });
+        let dir = ROOT.join(format!(
+            "case-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&dir).expect("create the patch-test case dir");
         dir
     }
 
@@ -492,9 +529,9 @@ mod tests {
                 OsString::from("--profile"),
                 OsString::from("sdk"),
                 OsString::from("--patch"),
-                first.canonicalize().unwrap().into_os_string(),
+                std::path::absolute(&first).unwrap().into_os_string(),
                 OsString::from("--patch"),
-                second.canonicalize().unwrap().into_os_string(),
+                std::path::absolute(&second).unwrap().into_os_string(),
             ],
             "patches must follow the profile pair as ordered --patch <abs> pairs"
         );
@@ -504,9 +541,83 @@ mod tests {
             ..Config::default()
         };
         let launch = resolve_runtime_with(&config, lookup(&env)).unwrap();
-        let expected = PathBuf::from("Cargo.toml").canonicalize().unwrap();
+        let expected = std::path::absolute("Cargo.toml").unwrap();
         assert!(expected.is_absolute());
         assert_eq!(launch.args[3], expected.into_os_string());
+    }
+
+    #[test]
+    fn resolve_tilde_relative_patch_is_expanded_absolute() {
+        // F1: a `~/...` patch is `~`-expanded and absolutized without an
+        // existence gate (Python `Path(patch).expanduser().resolve()` —
+        // `python/sdk/src/deepseek_harness/client.py:483-484`), so a
+        // `~/overlay.yml` patch launches instead of failing with
+        // `Error::Io` before spawn.
+        let env: HashMap<&'static str, &'static str> = HashMap::from([("DSH_RUNTIME_BIN", "dsh")]);
+        let config = Config {
+            patches: vec![PathBuf::from("~/overlay.yml")],
+            ..Config::default()
+        };
+        let launch = resolve_runtime_with(&config, lookup(&env)).unwrap();
+        let expected = std::env::home_dir()
+            .expect("a home dir exists for the test user")
+            .join("overlay.yml");
+        assert_eq!(
+            launch.args,
+            vec![
+                OsString::from("--profile"),
+                OsString::from("sdk"),
+                OsString::from("--patch"),
+                expected.into_os_string(),
+            ],
+            "a ~-relative patch must be expanded to the user home and absolutized"
+        );
+    }
+
+    #[test]
+    fn resolve_not_yet_existing_patch_is_resolved_absolute() {
+        // F1: patch resolution is non-strict — a not-yet-created patch file
+        // is still absolutized (Python `Path.resolve()`), so a patch the
+        // runtime will create later launches instead of failing with
+        // `Error::Io` before spawn.
+        let dir = temp_patch_dir();
+        let future = dir.join("future.yml");
+        assert!(
+            !future.exists(),
+            "precondition: the patch file must not exist yet"
+        );
+        let env: HashMap<&'static str, &'static str> = HashMap::from([("DSH_RUNTIME_BIN", "dsh")]);
+        let config = Config {
+            patches: vec![future.clone()],
+            ..Config::default()
+        };
+        let launch = resolve_runtime_with(&config, lookup(&env)).unwrap();
+        assert_eq!(
+            launch.args,
+            vec![
+                OsString::from("--profile"),
+                OsString::from("sdk"),
+                OsString::from("--patch"),
+                std::path::absolute(&future).unwrap().into_os_string(),
+            ],
+            "a not-yet-existing patch must still be resolved absolute"
+        );
+    }
+
+    #[test]
+    fn resolve_blank_patch_is_rejected_locally() {
+        // F1: an empty patch path is rejected locally as a configuration
+        // error (upstream `apps/cli/src/args.ts:91` rejects an empty patch
+        // path), never launched as `--patch <cwd>`.
+        let env: HashMap<&'static str, &'static str> = HashMap::from([("DSH_RUNTIME_BIN", "dsh")]);
+        let config = Config {
+            patches: vec![PathBuf::from("")],
+            ..Config::default()
+        };
+        assert!(matches!(
+            resolve_runtime_with(&config, lookup(&env)),
+            Err(Error::Config(_))
+        ));
     }
 
     #[test]
@@ -868,6 +979,38 @@ mod tests {
             map.get("DEEPSEEK_API_KEY").map(String::as_str),
             Some("user-key"),
             "caller env entries flow through verbatim"
+        );
+    }
+
+    #[test]
+    fn compose_env_caller_env_wins_over_configured_deepseek_keys() {
+        // F3 regression: the caller's `Config::env` wins over the
+        // crate-injected `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` on
+        // collision (spec §4.1; Python `env.update(self.config.env)`
+        // ordering — `python/sdk/src/deepseek_harness/client.py:75-77`).
+        let empty_env = HashMap::new();
+        let config = Config {
+            base_url: Some("https://configured.example".into()),
+            api_key: Some("sk-configured".into()),
+            env: Some(HashMap::from([
+                ("DEEPSEEK_BASE_URL".into(), "https://caller.example".into()),
+                ("DEEPSEEK_API_KEY".into(), "sk-caller".into()),
+            ])),
+            ..Config::default()
+        };
+        let map: HashMap<_, _> = compose_env_with(&config, lookup(&empty_env))
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert_eq!(
+            map.get("DEEPSEEK_BASE_URL").map(String::as_str),
+            Some("https://caller.example"),
+            "the caller's Config::env DEEPSEEK_BASE_URL must win over Config::base_url"
+        );
+        assert_eq!(
+            map.get("DEEPSEEK_API_KEY").map(String::as_str),
+            Some("sk-caller"),
+            "the caller's Config::env DEEPSEEK_API_KEY must win over Config::api_key"
         );
     }
 

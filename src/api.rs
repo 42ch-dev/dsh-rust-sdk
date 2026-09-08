@@ -23,7 +23,7 @@
 //! runtime. The official runtime and its sources live at
 //! <https://github.com/deepseek-ai/deepseek-harness>.
 
-use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use uuid::Uuid;
@@ -33,7 +33,9 @@ use crate::client::{
 };
 use crate::error::Error;
 use crate::protocol::{ContentBlock, Notification};
-use crate::runtime::{compose_env, resolve_runtime, Config};
+use crate::runtime::{
+    compose_env_with_home, env_var_non_empty, resolve_dsh_home_with, resolve_runtime, Config,
+};
 
 /// A running DeepSeek Harness instance, Python `DeepSeekHarness` parity.
 ///
@@ -45,6 +47,10 @@ use crate::runtime::{compose_env, resolve_runtime, Config};
 #[derive(Debug)]
 pub struct DeepSeekHarness {
     client: tokio::sync::Mutex<HarnessClient>,
+    /// The resolved absolute harness home this instance was launched with
+    /// (spec §3.2.4 observability; the value created at boot and injected
+    /// into the child as `DSH_HOME`).
+    dsh_home: PathBuf,
 }
 
 impl DeepSeekHarness {
@@ -60,7 +66,8 @@ impl DeepSeekHarness {
     /// `Config::env` entries, and `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY`
     /// when configured (spec §4). The resolved harness home is created when
     /// absent so a fresh home boots (spec §3.2.5); the selection is
-    /// observable through [`Config::resolve_dsh_home`] (spec §3.2.4).
+    /// observable through [`Config::resolve_dsh_home`] (spec §3.2.4) and
+    /// the instance accessor [`DeepSeekHarness::dsh_home`].
     ///
     /// [`Config::request_timeout`] bounds every request, including
     /// `session/prompt`; `None` (the default) waits indefinitely.
@@ -69,11 +76,13 @@ impl DeepSeekHarness {
     /// propagates, so the spawned child is never leaked (Python parity).
     pub async fn start(config: Config) -> Result<Self, Error> {
         let launch = resolve_runtime(&config)?;
-        // Resolve the harness home and create it when absent so a fresh
-        // home boots (spec §3.2.5); the resolved value is observable
-        // through `Config::resolve_dsh_home` (spec §3.2.4).
-        let parent_env: HashMap<String, String> = std::env::vars().collect();
-        let dsh_home = config.resolve_dsh_home(&parent_env);
+        // Resolve the harness home once and create it when absent so a
+        // fresh home boots (spec §3.2.5); the resolved value is observable
+        // through `Config::resolve_dsh_home` (spec §3.2.4) and the instance
+        // accessor [`DeepSeekHarness::dsh_home`]. The same value is passed
+        // into the compose path, so the created/logged home and the
+        // injected child `DSH_HOME` are identical (spec §3.2.3; F7).
+        let dsh_home = resolve_dsh_home_with(&config, &env_var_non_empty);
         std::fs::create_dir_all(&dsh_home).map_err(Error::Io)?;
         tracing::info!(dsh_home = %dsh_home.display(), "resolved DSH_HOME");
         let cwd = match &config.cwd {
@@ -83,7 +92,9 @@ impl DeepSeekHarness {
         let spec = LaunchSpec {
             program: launch.program,
             args: launch.args,
-            envs: compose_env(&config)?.into_iter().collect(),
+            envs: compose_env_with_home(&config, &dsh_home)?
+                .into_iter()
+                .collect(),
             cwd: Some(config.runtime_cwd.clone().unwrap_or_else(|| cwd.clone())),
         };
         // `Config::request_timeout` is the Python-parity request deadline
@@ -115,7 +126,20 @@ impl DeepSeekHarness {
         }
         Ok(Self {
             client: tokio::sync::Mutex::new(client),
+            dsh_home,
         })
+    }
+
+    /// The resolved absolute harness home this instance was launched with
+    /// (spec §3.2.4 observability; plan Task 2 accessor). The value is the
+    /// home resolved at boot — `Config::dsh_home` → non-empty `DSH_HOME`
+    /// (from `Config::env`, then the parent environment) → `~/.dsh`,
+    /// normalized absolute with `~` expanded (upstream `resolveDshHome`,
+    /// `packages/util/home-paths/src/index.ts:87-91`) — created when
+    /// absent and injected into the child as `DSH_HOME` (spec §3.2.3,
+    /// §3.2.5).
+    pub fn dsh_home(&self) -> &Path {
+        &self.dsh_home
     }
 
     /// Shut the runtime down and reap it (the plan 01 close ladder).
