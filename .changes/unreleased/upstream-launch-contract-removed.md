@@ -8,4 +8,5 @@ category: Removed
 - `Config::launch_args_override` is removed; use `Config::dsh_bin` + `Config::profile` + `Config::patches` — the launch is composed from typed fields, not an opaque argv.
 - `Config::runtime_bin` is renamed to `Config::dsh_bin` (the `DSH_RUNTIME_BIN` environment override is preserved).
 - The bundled `assets/cordis.yml` is removed; use the profile bundle shipped with the runtime instead.
+- The `assets/cordis.yml` entry in `Cargo.toml [package] include` is removed; the file no longer exists, and the profile bundle replaces the deleted asset.
 - `DEFAULT_CORDIS_YML` and `bundled_default_config_path` are removed; use the profile bundle instead.
