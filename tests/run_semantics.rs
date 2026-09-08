@@ -7,8 +7,9 @@
 
 mod common;
 
-use deepseek_harness_sdk::{DeepSeekHarness, Error, Input, RunResult};
+use deepseek_harness_sdk::{DeepSeekHarness, Error, Input, Notification, RunResult};
 use serde_json::{json, Value};
+use std::sync::{Arc, Mutex};
 
 use common::fake_runtime::{
     emit, exit, expect, expect_params, harness_config, respond, respond_error, run_prefix,
@@ -33,7 +34,7 @@ async fn run_once(script: &[Directive], input: &str) -> Result<RunResult, Error>
     let mut h = harness(script).await;
     let result = h
         .start_session(Some(ROOT_SESSION.to_string()))
-        .run(Input::Text(input.to_string()))
+        .run(Input::Text(input.to_string()), None)
         .await;
     h.close().await.expect("clean close");
     result
@@ -472,7 +473,7 @@ async fn prompt_error_propagates_and_client_stays_usable() {
     let session = h.start_session(Some(ROOT_SESSION.to_string()));
 
     let err = session
-        .run(Input::Text("hello".to_string()))
+        .run(Input::Text("hello".to_string()), None)
         .await
         .expect_err("a JSON-RPC error on session/prompt must propagate");
     match err {
@@ -491,7 +492,7 @@ async fn prompt_error_propagates_and_client_stays_usable() {
     // The harness (and the session) stay usable: a second turn runs to
     // completion against the same peer.
     let result = session
-        .run(Input::Text("again".to_string()))
+        .run(Input::Text("again".to_string()), None)
         .await
         .expect("the client must remain usable after a prompt error");
     assert_eq!(result.final_response, "second-chance");
@@ -639,4 +640,228 @@ async fn broadcast_overflow_before_receipt_fails_fast_with_lag_error() {
         }
         other => panic!("expected SdkProtocol, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn lagged_receive_still_delivers_retained_notification_to_callback() {
+    // A lagged `recv()` can still return a retained notification: the
+    // receiver falls behind the 4096-notification broadcast buffer by one
+    // (the oldest notification is dropped), and the next `recv()` returns
+    // the oldest retained one with the lag flag set. The callback must
+    // observe that delivered notification even though the run then fails
+    // fast with the lag error (spec §6.5 rule 1: every notification
+    // delivered to the subscription is observed, in wire order).
+    let mut script = vec![
+        expect_params(
+            "initialize",
+            json!({"provider": "deepseek-official", "model": "deepseek-v4-flash"}),
+        ),
+        respond(server_info_result()),
+        expect("session/prompt"),
+    ];
+    // The first notification is the one dropped by the overflow; the second
+    // is the oldest retained — the notification `recv()` returns with the
+    // lag flag set. It carries a distinct marker so the test can prove the
+    // callback saw exactly the retained notification.
+    script.push(emit(
+        "session.event",
+        root_event(json!({"type": "dropped-by-overflow"})),
+    ));
+    for index in 0..4096 {
+        script.push(emit(
+            "session.event",
+            root_event(json!({"type": "retained", "index": index})),
+        ));
+    }
+    script.push(respond(json!({"messageId": "msg-lag-cb"})));
+    script.push(exit(0));
+
+    let observed: Arc<Mutex<Vec<Notification>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut h = harness(&script).await;
+    let session = h.start_session(Some(ROOT_SESSION.to_string()));
+    let observed_for_callback = observed.clone();
+    let err = session
+        .run(
+            Input::Text("hello".to_string()),
+            Some(&move |notification: &Notification| {
+                observed_for_callback
+                    .lock()
+                    .expect("callback lock")
+                    .push(notification.clone());
+            }),
+        )
+        .await
+        .expect_err("a lagged subscription must fail the run");
+    h.close().await.expect("clean close");
+
+    match err {
+        Error::SdkProtocol { message } => {
+            assert!(
+                message.contains("fell behind the 4096-notification broadcast buffer"),
+                "the lag error must cite the buffer boundary: {message}"
+            );
+        }
+        other => panic!("expected SdkProtocol, got {other:?}"),
+    }
+
+    // The callback observed the retained notification the subscription
+    // delivered before the lag check failed the run; the dropped oldest
+    // notification is never seen.
+    let observed = observed.lock().expect("observed lock");
+    assert_eq!(
+        observed.len(),
+        1,
+        "exactly the retained notification is observed"
+    );
+    assert_eq!(event_type(&observed[0].payload), Some("retained"));
+    assert_eq!(
+        observed[0]
+            .payload
+            .get("event")
+            .and_then(|e| e.get("index"))
+            .and_then(Value::as_u64),
+        Some(0)
+    );
+}
+
+#[tokio::test]
+async fn on_notification_callback_observes_every_tree_notification_in_order() {
+    // A script whose tree delivers a pre-receipt notification (excluded
+    // from RunResult but still delivered to the subscription), the receipt,
+    // a subagent edge, a child event, a root assistant/message, turn/end,
+    // and the root idle — the full wire sequence the subscription hands the
+    // run.
+    let mut script = run_prefix("msg-cb");
+    script.extend([
+        emit(
+            "session.event",
+            root_event(json!({"type": "test", "text": "before-receipt"})),
+        ),
+        emit("session.event", root_event(receipt_event("msg-cb"))),
+        emit(
+            "subagent.started",
+            json!({"parentSessionId": ROOT_SESSION, "childSessionId": CHILD_SESSION}),
+        ),
+        emit(
+            "session.event",
+            session_event(
+                CHILD_SESSION,
+                assistant_event(json!([{"type": "text", "text": "child-output"}])),
+            ),
+        ),
+        emit(
+            "session.event",
+            root_event(assistant_event(
+                json!([{"type": "text", "text": "root-output"}]),
+            )),
+        ),
+        emit("session.event", root_event(turn_end("completed"))),
+        emit("session.status", idle(ROOT_SESSION)),
+        exit(0),
+    ]);
+
+    // Baseline: the no-callback path's RunResult for the same script.
+    let baseline = run_once(&script, "hello").await.expect("run succeeds");
+
+    // Callback path: record every notification the callback observes.
+    let observed: Arc<Mutex<Vec<Notification>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut h = harness(&script).await;
+    let session = h.start_session(Some(ROOT_SESSION.to_string()));
+    let observed_for_callback = observed.clone();
+    let result = session
+        .run(
+            Input::Text("hello".to_string()),
+            Some(&move |notification: &Notification| {
+                observed_for_callback
+                    .lock()
+                    .expect("callback lock")
+                    .push(notification.clone());
+            }),
+        )
+        .await
+        .expect("run succeeds");
+    h.close().await.expect("clean close");
+
+    // The callback observed every notification the subscription delivered,
+    // in wire order — including the pre-receipt one RunResult excludes.
+    let observed = observed.lock().expect("observed lock");
+    let methods: Vec<&str> = observed.iter().map(|n| n.method.as_str()).collect();
+    assert_eq!(
+        methods,
+        [
+            "session.event", // before-receipt
+            "session.event", // receipt
+            "subagent.started",
+            "session.event",  // child
+            "session.event",  // root assistant/message
+            "session.event",  // turn/end
+            "session.status", // root idle
+        ]
+    );
+    assert_eq!(event_type(&observed[0].payload), Some("test"));
+    assert_eq!(
+        event_type(&observed[1].payload),
+        Some("agent/inbox/spliced")
+    );
+    assert_eq!(
+        observed[2]
+            .payload
+            .get("childSessionId")
+            .and_then(Value::as_str),
+        Some(CHILD_SESSION)
+    );
+    assert_eq!(
+        observed[3].payload.get("sessionId").and_then(Value::as_str),
+        Some(CHILD_SESSION)
+    );
+    assert_eq!(
+        observed[6].payload.get("status").and_then(Value::as_str),
+        Some("idle")
+    );
+
+    // The callback observes; it does not change the result: the RunResult
+    // is identical to the no-callback path (spec §6.5 rule 3).
+    assert_eq!(result, baseline);
+}
+
+#[test]
+fn callback_panic_propagates_out_of_run() {
+    // spec §6.5 rule 5: a panic in the callback is a caller bug and MUST
+    // propagate; the crate MUST NOT swallow it. Drive `run` on a fresh
+    // current-thread runtime inside `catch_unwind` so the callback's
+    // panic unwinds through the crate and is observed here — a swallowed
+    // panic would make `run` return normally and this assertion fail.
+    let mut script = run_prefix("msg-panic");
+    script.push(emit(
+        "session.event",
+        root_event(receipt_event("msg-panic")),
+    ));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rt.block_on(async {
+            let h = harness(&script).await;
+            let session = h.start_session(Some(ROOT_SESSION.to_string()));
+            let _ = session
+                .run(
+                    Input::Text("hello".to_string()),
+                    Some(&|_notification: &Notification| {
+                        panic!("callback panic must propagate (spec §6.5 rule 5)")
+                    }),
+                )
+                .await;
+        })
+    }));
+    let panic = outcome.expect_err("the callback panic must not be swallowed by run()");
+    let message = panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("<non-string panic>");
+    assert!(
+        message.contains("callback panic must propagate"),
+        "the propagated panic must be the callback's, not a harness panic: {message}"
+    );
 }

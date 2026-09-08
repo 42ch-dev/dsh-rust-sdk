@@ -72,10 +72,11 @@ pub use api::{extract_finish_reason, DeepSeekHarness, Input, RunResult, Session}
 pub use client::{ClientTimeouts, HarnessClient, LaunchSpec, NotificationSubscription};
 pub use error::Error;
 pub use protocol::{
-    ContentBlock, ImageAttachmentRef, IncomingFrame, IncomingRequest, InitializeParams,
-    InitializeResult, JsonRpcErrorBody, JsonRpcId, JsonRpcResponse, JsonRpcResponseOutcome,
-    Notification, ServerInfo, SessionEventNotification, SessionPromptParams, SessionPromptResult,
-    SessionStatusNotification, SubagentFinishedNotification, SubagentStartedNotification,
+    ContentBlock, Dimensions, FileAttachmentRef, ImageAttachmentRef, IncomingFrame,
+    IncomingRequest, InitializeParams, InitializeResult, JsonRpcErrorBody, JsonRpcId,
+    JsonRpcResponse, JsonRpcResponseOutcome, Notification, ServerInfo, SessionEventNotification,
+    SessionPromptParams, SessionPromptResult, SessionStatusNotification,
+    SubagentFinishedNotification, SubagentStartedNotification,
 };
 pub use runtime::Config;
 pub use transport::JsonRpcLineTransport;

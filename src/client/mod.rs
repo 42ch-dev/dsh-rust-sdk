@@ -15,8 +15,8 @@
 //! The implementation is split into focused submodules (`core` for the
 //! spawn/request surface, `read_loop`, `subscription`, `session_tree`,
 //! `close_ladder`) that share the state types and diagnostics helpers below;
-//! the public surface is re-exported unchanged, so the crate-level API is
-//! identical to a single-module layout.
+//! the public surface is re-exported from the submodules, so the crate-level
+//! API is identical to a single-module layout.
 
 mod close_ladder;
 mod core;

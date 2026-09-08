@@ -1,4 +1,23 @@
 use serde_json::Value;
+use std::fmt;
+
+/// Renders the selected-profile suffix for the timeout message
+/// Python-style (` (selected dsh profile 'sdk')`) when a profile is
+/// present (spec §7; Python appends `selected dsh profile {profile!r}` —
+/// `python/sdk/src/deepseek_harness/client.py:158-160`).
+///
+/// `Option<String>` has no `Display`, so the thiserror format string
+/// passes the profile through this wrapper as an explicit argument.
+struct ProfileSuffix<'a>(Option<&'a str>);
+
+impl fmt::Display for ProfileSuffix<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Some(profile) => write!(f, " (selected dsh profile '{profile}')"),
+            None => Ok(()),
+        }
+    }
+}
 
 /// Typed error taxonomy for the DeepSeek Harness SDK.
 ///
@@ -14,13 +33,28 @@ pub enum Error {
     TransportClosed(String),
 
     /// A request did not get a response within the configured timeout.
-    #[error("{method} timed out waiting for DeepSeek Harness runtime: {source}")]
+    ///
+    /// `method` is exactly the wire method name; `profile` names the
+    /// selected DSH profile when the handshake had one, rendered in the
+    /// message so a wedged handshake is diagnosable (spec §7; Python
+    /// appends `selected dsh profile {profile!r}` —
+    /// `python/sdk/src/deepseek_harness/client.py:158-160`).
+    #[error(
+        "{method} timed out waiting for DeepSeek Harness runtime: {source}{}",
+        ProfileSuffix(profile.as_deref()),
+    )]
     RequestTimeout {
-        /// The JSON-RPC method that timed out.
+        /// The JSON-RPC method that timed out — exactly the wire method
+        /// name (spec §7).
         method: String,
         /// The underlying timeout error.
         #[source]
         source: tokio::time::error::Elapsed,
+        /// The selected DSH profile for the launch, when the handshake
+        /// had one, named in the rendered message (spec §7; Python
+        /// appends `selected dsh profile {profile!r}` —
+        /// `python/sdk/src/deepseek_harness/client.py:158-160`).
+        profile: Option<String>,
     },
 
     /// A protocol-level violation: the runtime's behavior contradicts the
@@ -100,10 +134,29 @@ mod tests {
         let err = Error::RequestTimeout {
             method: "initialize".into(),
             source: elapsed().await,
+            profile: None,
         };
         assert_eq!(
             err.to_string(),
             "initialize timed out waiting for DeepSeek Harness runtime: deadline has elapsed"
+        );
+    }
+
+    #[tokio::test]
+    async fn display_request_timeout_names_profile_in_message() {
+        // The profile is a public `Option<String>` field (spec §7; Python
+        // appends `selected dsh profile {profile!r}`), rendered in the
+        // message when present, while `method` stays the exact wire method
+        // name.
+        let err = Error::RequestTimeout {
+            method: "initialize".into(),
+            source: elapsed().await,
+            profile: Some("sdk".into()),
+        };
+        assert_eq!(
+            err.to_string(),
+            "initialize timed out waiting for DeepSeek Harness runtime: \
+             deadline has elapsed (selected dsh profile 'sdk')"
         );
     }
 
@@ -174,6 +227,7 @@ mod tests {
         assert!(!Error::RequestTimeout {
             method: "m".into(),
             source: elapsed().await,
+            profile: None,
         }
         .is_protocol());
         assert!(!Error::JsonRpc {

@@ -63,6 +63,15 @@ pub struct LaunchSpec {
 /// gives the runtime time to flush durable state after stdin closes.
 #[derive(Debug, Clone, Copy)]
 pub struct ClientTimeouts {
+    /// Bound for the `initialize` handshake request only (spec §6.4).
+    /// `None` waits indefinitely. The activity interval and
+    /// `session/prompt` keep using [`ClientTimeouts::request_timeout`]
+    /// (Python parity: `initialize_timeout_seconds` vs
+    /// `request_timeout_seconds`). The high-level
+    /// [`Config::initialize_timeout`](crate::runtime::Config::initialize_timeout)
+    /// carries the Python-parity 30 s default and is copied here by
+    /// [`DeepSeekHarness::start`](crate::api::DeepSeekHarness::start).
+    pub initialize_timeout: Option<Duration>,
     /// Per-request response deadline. `None` waits indefinitely (the Python
     /// SDK default). There is no wire-level cancellation: on timeout the
     /// client abandons the wait and removes the pending entry, while the
@@ -81,6 +90,7 @@ pub struct ClientTimeouts {
 impl Default for ClientTimeouts {
     fn default() -> Self {
         Self {
+            initialize_timeout: None,
             request_timeout: None,
             shutdown_timeout: Duration::from_secs(1),
             eof_grace: Duration::from_secs(6),
@@ -246,6 +256,22 @@ impl HarnessClient {
     /// unknown ids are dropped. When the runtime is already dead (or spawn
     /// failed), fails fast with the exit code and captured stderr tail.
     pub async fn request(&self, method: &str, params: Option<Value>) -> Result<Value, Error> {
+        self.request_with_timeout(method, params, self.timeouts.request_timeout, None)
+            .await
+    }
+
+    /// [`HarnessClient::request`] with an explicit response deadline and
+    /// timeout-diagnostic profile, so the `initialize` handshake can apply
+    /// its own bound ([`ClientTimeouts::initialize_timeout`], spec §6.4)
+    /// while every other request keeps the generic
+    /// [`ClientTimeouts::request_timeout`].
+    async fn request_with_timeout(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        timeout: Option<Duration>,
+        profile: Option<String>,
+    ) -> Result<Value, Error> {
         // Fast-fail on a closed or dead runtime, with process context.
         {
             let st = lock(&self.state);
@@ -311,7 +337,7 @@ impl HarnessClient {
             }
         }
 
-        let outcome = match self.timeouts.request_timeout {
+        let outcome = match timeout {
             Some(duration) => match tokio::time::timeout(duration, rx).await {
                 Ok(result) => result,
                 Err(elapsed) => {
@@ -319,8 +345,13 @@ impl HarnessClient {
                     // response is dropped; the server-side work continues.
                     lock(&self.pending).remove(&id);
                     return Err(Error::RequestTimeout {
+                        // The method stays the exact wire method name (spec
+                        // §7); the selected profile, when the handshake had
+                        // one, rides in the public `profile` field and is
+                        // rendered in the message.
                         method: method.to_string(),
                         source: elapsed,
+                        profile,
                     });
                 }
             },
@@ -344,12 +375,51 @@ impl HarnessClient {
     /// `deepseek-harness-sdk-runtime`, or when `version` is absent — the
     /// protocol declares the name wire-stable and has no version negotiation,
     /// so an unexpected identity is a hard protocol error.
+    ///
+    /// `reasoning_effort` is sent as the wire key `reasoningEffort`;
+    /// `None`, empty, and whitespace-only values are dropped by the wire
+    /// type itself ([`InitializeParams::reasoning_effort`], spec §6.3), so
+    /// this low-level path can never send a blank value. The high-level
+    /// path ([`DeepSeekHarness::start`](crate::api::DeepSeekHarness::start))
+    /// additionally normalizes
+    /// [`Config::reasoning_effort`](crate::runtime::Config::reasoning_effort)
+    /// through `Config::reasoning_effort_for_wire`, which drops empty and
+    /// whitespace-only values before they reach this call.
+    ///
+    /// The handshake is bounded by [`ClientTimeouts::initialize_timeout`]
+    /// (spec §6.4) — the bound applies to the handshake only, never to
+    /// `session/prompt` or the activity interval, which keep using
+    /// [`ClientTimeouts::request_timeout`]. On expiry the error is
+    /// [`Error::RequestTimeout`]; the high-level
+    /// [`DeepSeekHarness::start`](crate::api::DeepSeekHarness::start) path
+    /// names the selected profile in the message (spec §7).
     pub async fn initialize(
         &mut self,
         cwd: impl Into<String>,
         provider: impl Into<String>,
         model: impl Into<String>,
+        reasoning_effort: Option<&str>,
         max_tokens: Option<u32>,
+    ) -> Result<InitializeResult, Error> {
+        self.initialize_with_profile(cwd, provider, model, reasoning_effort, max_tokens, None)
+            .await
+    }
+
+    /// [`HarnessClient::initialize`] with the selected profile threaded to
+    /// the timeout diagnostic (spec §7).
+    ///
+    /// `pub(crate)` so the high-level
+    /// [`DeepSeekHarness::start`](crate::api::DeepSeekHarness::start) path
+    /// names the profile in the timeout message while the public low-level
+    /// signature stays unchanged.
+    pub(crate) async fn initialize_with_profile(
+        &mut self,
+        cwd: impl Into<String>,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        reasoning_effort: Option<&str>,
+        max_tokens: Option<u32>,
+        profile: Option<String>,
     ) -> Result<InitializeResult, Error> {
         if max_tokens == Some(0) {
             return Err(Error::SdkProtocol {
@@ -360,10 +430,16 @@ impl HarnessClient {
             cwd: cwd.into(),
             provider: provider.into(),
             model: model.into(),
+            reasoning_effort: reasoning_effort.map(str::to_string),
             max_tokens,
         };
         let result = self
-            .request("initialize", Some(serde_json::to_value(params)?))
+            .request_with_timeout(
+                "initialize",
+                Some(serde_json::to_value(params)?),
+                self.timeouts.initialize_timeout,
+                profile,
+            )
             .await?;
         let init: InitializeResult =
             serde_json::from_value(result).map_err(|err| Error::SdkProtocol {

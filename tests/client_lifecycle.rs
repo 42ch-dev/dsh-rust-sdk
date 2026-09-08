@@ -31,7 +31,7 @@ const UNRELATED_SESSION: &str = "unrelated";
 
 async fn initialize_ok(rt: &mut FakeRuntime) {
     rt.client
-        .initialize("/tmp", "deepseek", "deepseek-chat", Some(1024))
+        .initialize("/tmp", "deepseek", "deepseek-chat", None, Some(1024))
         .await
         .expect("initialize succeeds");
 }
@@ -45,6 +45,7 @@ async fn initialize_happy_path_returns_server_info() {
                 "cwd": "/tmp",
                 "provider": "deepseek",
                 "model": "deepseek-chat",
+                "reasoningEffort": "high",
                 "maxTokens": 1024,
             }),
         ),
@@ -54,7 +55,13 @@ async fn initialize_happy_path_returns_server_info() {
 
     let result = rt
         .client
-        .initialize("/tmp", "deepseek", "deepseek-chat", Some(1024))
+        .initialize(
+            "/tmp",
+            "deepseek",
+            "deepseek-chat",
+            Some("high"),
+            Some(1024),
+        )
         .await
         .expect("initialize succeeds");
     assert_eq!(
@@ -76,7 +83,7 @@ async fn initialize_with_wrong_server_name_returns_sdk_protocol() {
 
     let err = rt
         .client
-        .initialize("/tmp", "deepseek", "deepseek-chat", Some(1024))
+        .initialize("/tmp", "deepseek", "deepseek-chat", None, Some(1024))
         .await
         .expect_err("initialize must reject a foreign server identity");
     assert!(
@@ -335,6 +342,111 @@ async fn request_timeout_returns_request_timeout() {
 
     // The peer never responds; close() escalates the ladder and reaps it.
     client.close().await.expect("close reaps the ignoring peer");
+}
+
+#[tokio::test]
+async fn initialize_timeout_bounds_handshake() {
+    // Spec §6.4 / launch spec §7: the handshake is bounded by
+    // `initialize_timeout` (not `request_timeout`). The peer accepts the
+    // initialize frame and never replies; a short bound keeps the test
+    // fast. The low-level path has no profile context, so the message names
+    // no profile here — the high-level `start()` path carries it (see
+    // `start_bounds_initialize_handshake_via_config`).
+    let spec = fake_runtime_spec(&[expect("initialize"), ignore_all()]).expect("serialize script");
+    let timeouts = ClientTimeouts {
+        initialize_timeout: Some(Duration::from_millis(200)),
+        ..test_timeouts()
+    };
+    let mut client = HarnessClient::spawn(spec, timeouts).expect("spawn fake runtime");
+
+    let started = std::time::Instant::now();
+    let err = client
+        .initialize("/tmp", "deepseek", "deepseek-chat", None, Some(1024))
+        .await
+        .expect_err("an unanswered initialize must time out");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the bound must fire promptly, not hang"
+    );
+    match &err {
+        Error::RequestTimeout {
+            method, profile, ..
+        } => {
+            assert_eq!(method, "initialize");
+            assert_eq!(
+                profile, &None,
+                "the low-level path has no profile context, so the field must be None (spec §7)"
+            );
+        }
+        other => panic!("expected RequestTimeout, got {other:?}"),
+    }
+
+    // The peer never responds; close() escalates the ladder and reaps it.
+    client.close().await.expect("close reaps the ignoring peer");
+}
+
+#[tokio::test]
+async fn start_bounds_initialize_handshake_via_config() {
+    // Spec §6.4: `Config::initialize_timeout` (default 30 s) bounds the
+    // handshake; a wedged runtime fails `start()` within the bound instead
+    // of hanging, and the error names the selected profile (spec §7).
+    let mut config =
+        harness_config(&[expect("initialize"), ignore_all()]).expect("serialize script");
+    config.initialize_timeout = Some(Duration::from_millis(200));
+
+    // The wall-clock bound is measured on the handshake alone — the
+    // `RequestTimeout` return, before the close ladder — so the timing
+    // assertion is not the tightest in the suite (qc3 S-1). `start()`
+    // runs the close ladder before propagating, so the timing is
+    // measured on the low-level handshake with the same bound the
+    // config carries; the high-level path below locks the error
+    // contract (method, profile, message).
+    let spec = fake_runtime_spec(&[expect("initialize"), ignore_all()]).expect("serialize script");
+    let timeouts = ClientTimeouts {
+        initialize_timeout: config.initialize_timeout,
+        ..test_timeouts()
+    };
+    let mut client = HarnessClient::spawn(spec, timeouts).expect("spawn fake runtime");
+    let started = std::time::Instant::now();
+    let low_err = client
+        .initialize("/tmp", "deepseek", "deepseek-chat", None, Some(1024))
+        .await
+        .expect_err("an unanswered initialize must time out");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the bound must fire promptly, not hang"
+    );
+    assert!(
+        matches!(low_err, Error::RequestTimeout { .. }),
+        "unexpected error: {low_err}"
+    );
+    client.close().await.expect("close reaps the ignoring peer");
+
+    // The high-level path: `start()` copies `Config::initialize_timeout`
+    // into the client timeouts and names the selected profile (spec §7).
+    let err = DeepSeekHarness::start(config)
+        .await
+        .expect_err("a wedged handshake must fail start() within the bound");
+    match &err {
+        Error::RequestTimeout {
+            method, profile, ..
+        } => {
+            assert_eq!(
+                method, "initialize",
+                "the method must stay the exact wire method name (spec §7): {method}"
+            );
+            assert_eq!(
+                profile.as_deref(),
+                Some("sdk"),
+                "the high-level path must carry the selected profile (spec §7)"
+            );
+            assert!(
+                err.to_string().contains("selected dsh profile 'sdk'"),
+                "the timeout message must name the selected profile: {err}"
+            );
+        }
+        other => panic!("expected RequestTimeout, got {other:?}"),
+    }
 }
 
 #[tokio::test]

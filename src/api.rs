@@ -69,8 +69,10 @@ impl DeepSeekHarness {
     /// observable through [`Config::resolve_dsh_home`] (spec §3.2.4) and
     /// the instance accessor [`DeepSeekHarness::dsh_home`].
     ///
-    /// [`Config::request_timeout`] bounds every request, including
-    /// `session/prompt`; `None` (the default) waits indefinitely.
+    /// [`Config::initialize_timeout`] bounds the `initialize` handshake
+    /// only (spec §6.4); [`Config::request_timeout`] bounds every other
+    /// request, including `session/prompt`; `None` (the default) waits
+    /// indefinitely.
     ///
     /// On `initialize` failure the close ladder is run before the error
     /// propagates, so the spawned child is never leaked (Python parity).
@@ -97,18 +99,22 @@ impl DeepSeekHarness {
                 .collect(),
             cwd: Some(config.runtime_cwd.clone().unwrap_or_else(|| cwd.clone())),
         };
-        // `Config::request_timeout` is the Python-parity request deadline
-        // (`None` = wait indefinitely); `Config::timeouts` supplies the
-        // close-ladder timings.
+        // `Config::initialize_timeout` bounds the handshake only (spec
+        // §6.4); `Config::request_timeout` is the Python-parity request
+        // deadline (`None` = wait indefinitely); `Config::timeouts`
+        // supplies the close-ladder timings.
         let mut timeouts = config.timeouts;
         timeouts.request_timeout = config.request_timeout;
+        timeouts.initialize_timeout = config.initialize_timeout;
         let mut client = HarnessClient::spawn(spec, timeouts)?;
         if let Err(err) = client
-            .initialize(
+            .initialize_with_profile(
                 cwd.to_string_lossy().into_owned(),
                 &config.provider,
                 &config.model,
+                config.reasoning_effort_for_wire(),
                 config.max_tokens,
+                Some(config.profile.clone()),
             )
             .await
         {
@@ -219,7 +225,37 @@ impl Session<'_> {
     /// malformed notification; Rust surfaces the same condition as a typed
     /// error instead of silently dropping an event or misreading the idle
     /// termination.
-    pub async fn run(&self, input: Input) -> Result<RunResult, Error> {
+    ///
+    /// # Per-notification callback
+    ///
+    /// `on_notification` observes **every notification delivered to this
+    /// run's session-tree subscription, in wire order** — including
+    /// `session.event`, `session.status`, and `subagent.*` — and is invoked
+    /// as each notification arrives, not deferred until the run ends. It is
+    /// a layer over the existing subscription path, never a second
+    /// subscription: the run already owns one tree subscription, and the
+    /// callback neither filters nor consumes. Passing `None` behaves
+    /// exactly like the no-callback path, and the returned [`RunResult`] is
+    /// identical with or without a callback (spec §6.5; upstream
+    /// `packages/sdk/client/src/api.ts:150-156,186-200`,
+    /// `python/sdk/src/deepseek_harness/api.py:124-131,139-144`).
+    ///
+    /// The callback is invoked **before** the run's lag gate: a lagged
+    /// `recv()` can still return a retained notification, and that
+    /// delivered notification is observed even though the run then fails
+    /// fast with the lag error instead of trusting a truncated stream.
+    ///
+    /// The bound is `Fn(&Notification) + Send + Sync`, not `FnMut`: a
+    /// caller needing shared mutable state captures an `Arc<Mutex<..>>` by
+    /// interior mutability, and [`Session::run`] keeps taking `&self` — the
+    /// callback never requires giving up ownership of the session. A panic
+    /// in the callback is a caller bug and propagates; the crate does not
+    /// swallow it (spec §6.5).
+    pub async fn run(
+        &self,
+        input: Input,
+        on_notification: Option<&(dyn Fn(&Notification) + Send + Sync)>,
+    ) -> Result<RunResult, Error> {
         let content_blocks = match input {
             Input::Text(text) => vec![ContentBlock::Text { text }],
             Input::Blocks(blocks) => blocks,
@@ -239,9 +275,18 @@ impl Session<'_> {
 
         // Phase 1 — the durable inbox receipt of this exact message.
         // Notifications before it are dropped from both `events` and
-        // `notifications` (Python parity).
+        // `notifications` (Python parity), but the callback still observes
+        // them: it sees every notification the subscription delivers, in
+        // wire order (spec §6.5).
         let receipt = loop {
             let notification = subscription.recv().await?;
+            // The callback runs before the lag gate: a lagged `recv()` can
+            // still return a retained notification, and that delivered
+            // notification must be observed even though the run then fails
+            // fast on the truncated stream (spec §6.5 rule 1).
+            if let Some(callback) = on_notification {
+                callback(&notification);
+            }
             ensure_no_lag(&mut subscription)?;
             let is_receipt = match notification.session_event() {
                 Some(Ok(event)) => {
@@ -338,6 +383,11 @@ impl Session<'_> {
                 break;
             }
             notification = subscription.recv().await?;
+            // Same ordering as the receipt wait: the callback observes the
+            // delivered notification before the lag gate can fail the run.
+            if let Some(callback) = on_notification {
+                callback(&notification);
+            }
             ensure_no_lag(&mut subscription)?;
         }
 
