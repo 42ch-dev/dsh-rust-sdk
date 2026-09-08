@@ -22,12 +22,14 @@
 //! subprocess: the resolved `DSH_HOME` (non-empty `$DSH_HOME` from
 //! `Config::env`, then the parent environment, else `~/.dsh` — upstream
 //! `resolveDshHome`, `packages/util/home-paths/src/index.ts:87-91`), the
-//! caller's `Config::env` entries verbatim, and `DEEPSEEK_BASE_URL` /
-//! `DEEPSEEK_API_KEY` when configured. The caller's `Config::env` wins over
-//! the injected `DSH_HOME` on collision (Python `env.update(self.config.env)`
-//! ordering, `python/sdk/src/deepseek_harness/client.py:75-77`). The crate
-//! never writes `DSH_CORDIS_CONFIG`, `DSH_SESSION_ROOT`, or `DSH_CWD` —
-//! none has a reader upstream (spec §4.2).
+//! caller's `Config::env` entries (verbatim, except that the three
+//! forbidden keys of spec §4.2 are filtered out under any configuration),
+//! and `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` when configured. The
+//! caller's `Config::env` wins over the injected `DSH_HOME` on collision
+//! (Python `env.update(self.config.env)` ordering,
+//! `python/sdk/src/deepseek_harness/client.py:75-77`). The crate never
+//! writes `DSH_CORDIS_CONFIG`, `DSH_SESSION_ROOT`, or `DSH_CWD` — none has
+//! a reader upstream (spec §4.2).
 //!
 //! The official runtime and its sources live at
 //! <https://github.com/deepseek-ai/deepseek-harness>.
@@ -222,6 +224,15 @@ fn resolve_runtime_with(
     config: &Config,
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Result<RuntimeLaunch, Error> {
+    // The profile is validated before the runtime lookup so an empty/blank
+    // profile is rejected locally with a configuration error (spec §2.2.6,
+    // §7) even when no runtime binary is configured anywhere — the
+    // missing-runtime error must never mask the profile violation.
+    if config.profile.trim().is_empty() {
+        return Err(Error::Config(
+            "profile must not be empty: dsh --profile <name> is required".to_string(),
+        ));
+    }
     // 1. explicit Config dsh_bin (Python `_default_launch_args`).
     // 2. Rust-only route: DSH_RUNTIME_BIN from the parent environment.
     // 3. Nothing anywhere → RuntimeNotFound with both acquisition routes.
@@ -233,13 +244,7 @@ fn resolve_runtime_with(
         return Err(Error::RuntimeNotFound(RUNTIME_NOT_FOUND_HINT.to_string()));
     };
     // The launch grammar is `dsh --profile <name> [--patch <path>]...`
-    // (upstream `apps/cli/src/args.ts:137-140`); an empty profile is
-    // rejected locally (spec §2.2.6) so the failure stays attributable.
-    if config.profile.trim().is_empty() {
-        return Err(Error::Config(
-            "profile must not be empty: dsh --profile <name> is required".to_string(),
-        ));
-    }
+    // (upstream `apps/cli/src/args.ts:137-140`); remaining argv composition:
     let mut args = vec![OsString::from("--profile"), OsString::from(&config.profile)];
     for patch in &config.patches {
         // Patch paths are resolved absolute before spawn, matching both
@@ -252,16 +257,25 @@ fn resolve_runtime_with(
     Ok(RuntimeLaunch { program, args })
 }
 
+/// The environment keys the crate MUST never write into the child
+/// environment, under any configuration (spec §4.2). None has a reader
+/// upstream: the bundled `cordis.yml` consuming `DSH_CORDIS_CONFIG` was
+/// deleted, sessions live under `$DSH_HOME/sessions`, and the workspace cwd
+/// reaches the runtime through `initialize.cwd` (spec §4.2 evidence).
+const FORBIDDEN_ENV_KEYS: [&str; 3] = ["DSH_CORDIS_CONFIG", "DSH_SESSION_ROOT", "DSH_CWD"];
+
 /// Compose the environment override set injected into the runtime subprocess.
 ///
 /// Returns exactly the applicable override keys, in a stable order: the
 /// resolved `DSH_HOME` first, then the caller's `Config::env` entries
-/// verbatim, then `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` when configured.
-/// When a key appears twice, the later entry wins at spawn, so the caller's
-/// `Config::env` overrides the injected `DSH_HOME` on collision (Python
-/// `env.update(self.config.env)` ordering —
-/// `python/sdk/src/deepseek_harness/client.py:75-77`). Every other variable
-/// is inherited wholesale from the parent environment by the spawn layer.
+/// (verbatim, except that the three forbidden keys of spec §4.2 are
+/// filtered out under any configuration), then `DEEPSEEK_BASE_URL` /
+/// `DEEPSEEK_API_KEY` when configured. When a key appears twice, the later
+/// entry wins at spawn, so the caller's `Config::env` overrides the
+/// injected `DSH_HOME` on collision (Python `env.update(self.config.env)`
+/// ordering — `python/sdk/src/deepseek_harness/client.py:75-77`). Every
+/// other variable is inherited wholesale from the parent environment by the
+/// spawn layer.
 ///
 /// The crate never writes `DSH_CORDIS_CONFIG`, `DSH_SESSION_ROOT`, or
 /// `DSH_CWD` — none has a reader upstream (spec §4.2).
@@ -282,6 +296,10 @@ fn compose_env_with(
         envs.extend(
             extra
                 .iter()
+                // Spec §4.2 forbids the three keys under any configuration,
+                // which overrides the §4.1 verbatim rule for those names:
+                // they are filtered out even when the caller supplies them.
+                .filter(|(key, _)| !FORBIDDEN_ENV_KEYS.contains(&key.as_str()))
                 .map(|(key, value)| (key.clone(), value.clone())),
         );
     }
@@ -426,6 +444,22 @@ mod tests {
     }
 
     #[test]
+    fn resolve_combined_invalid_profile_and_missing_runtime_is_config_error() {
+        // An empty profile with no runtime binary anywhere must fail as a
+        // local configuration error (spec §2.2.6, §7): the missing-runtime
+        // lookup must not mask the profile violation.
+        let empty_env = HashMap::new();
+        let config = Config {
+            profile: "".to_string(),
+            ..Config::default()
+        };
+        assert!(matches!(
+            resolve_runtime_with(&config, lookup(&empty_env)),
+            Err(Error::Config(_))
+        ));
+    }
+
+    #[test]
     fn resolve_dsh_bin_wins_over_env() {
         let env: HashMap<&'static str, &'static str> =
             HashMap::from([("DSH_RUNTIME_BIN", "env-bin")]);
@@ -524,6 +558,39 @@ mod tests {
                 "{forbidden} must never be written into the child env: {map:?}"
             );
         }
+    }
+
+    #[test]
+    fn compose_env_filters_forbidden_keys_from_caller_env() {
+        // Spec §4.2: the three forbidden keys MUST NOT be written under any
+        // configuration — even when the caller supplies them in
+        // `Config::env`, they are filtered before the override list is
+        // built. Every other caller entry still flows through verbatim.
+        let empty_env = HashMap::new();
+        let config = Config {
+            env: Some(HashMap::from([
+                ("DSH_CWD".into(), "/tmp/caller-cwd".into()),
+                ("DSH_CORDIS_CONFIG".into(), "/tmp/caller-cordis.yml".into()),
+                ("DSH_SESSION_ROOT".into(), "/tmp/caller-sessions".into()),
+                ("FOO".into(), "bar".into()),
+            ])),
+            ..Config::default()
+        };
+        let map: HashMap<_, _> = compose_env_with(&config, lookup(&empty_env))
+            .unwrap()
+            .into_iter()
+            .collect();
+        for forbidden in ["DSH_CORDIS_CONFIG", "DSH_SESSION_ROOT", "DSH_CWD"] {
+            assert!(
+                !map.contains_key(forbidden),
+                "{forbidden} must not pass through even when caller-supplied: {map:?}"
+            );
+        }
+        assert_eq!(
+            map.get("FOO").map(String::as_str),
+            Some("bar"),
+            "allowed caller env entries still flow through verbatim"
+        );
     }
 
     #[test]

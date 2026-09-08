@@ -47,7 +47,8 @@ pub enum Error {
 
     /// A configuration error: the caller's [`Config`](crate::runtime::Config)
     /// cannot launch a runtime (e.g. an empty `profile`), rejected locally
-    /// before spawn (spec §2.2.6).
+    /// before spawn (upstream `apps/cli/src/args.ts:148-149` rejects an
+    /// empty `--profile`; spec §2.2.6, §7).
     #[error("invalid configuration: {0}")]
     Config(String),
 

@@ -38,7 +38,8 @@
 //! `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` when configured; the parent
 //! environment is otherwise inherited wholesale. The crate never writes
 //! `DSH_CORDIS_CONFIG`, `DSH_SESSION_ROOT`, or `DSH_CWD` — none has a
-//! reader upstream.
+//! reader upstream — and filters them out of `Config::env` as well (spec
+//! §4.2).
 //!
 //! The runtime binary is bring-your-own (Plan A): [`DeepSeekHarness::start`]
 //! resolves it from `Config::dsh_bin` or the `DSH_RUNTIME_BIN` environment
