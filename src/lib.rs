@@ -58,13 +58,38 @@
 //! targets**: Linux x64, Linux arm64, macOS arm64, macOS x64, and Windows
 //! x64.
 //!
+//! # Deliberate divergences
+//!
+//! The divergences below are deliberate and documented (wire spec §7); a
+//! contributor must not "fix" one back to reference behaviour without a
+//! superseding spec decision:
+//!
+//! - **`DSH_HOME` fallback** — the crate resolves `~/.dsh` where Python
+//!   raises `ValueError`.
+//! - **No client-directed request API** — Python exposes `next_request` /
+//!   `respond` / `notify`; the crate exposes none (the runtime emits no
+//!   client-directed requests; they are auto-answered `-32601`). Non-goal,
+//!   not a gap.
+//! - **Stricter malformed-notification policy** — a `session.event` /
+//!   `session.status` whose payload fails its shape check fails the run
+//!   with `Error::SdkProtocol`; Python silently skips a malformed
+//!   event/status. This converts a silent hang into a typed failure and is
+//!   **not** Python parity.
+//! - **Strict `serverInfo.name` equality** — `initialize` requires the
+//!   identity to be exactly `deepseek-harness-sdk-runtime`; an upstream
+//!   rename fails loudly instead of being silently accepted.
+//! - **No `run()` convenience, no lazy start** — the crate requires an
+//!   explicit [`DeepSeekHarness::start`]; Python and the TypeScript SDK can
+//!   start lazily on first use. Non-goal, not a gap.
+//!
 //! # Non-goals
 //!
 //! - **No cancellation**: there is no session-close / cancel RPC.
 //!   [`Session::run`] waits for root `idle`; closing the harness mid-turn
 //!   abandons the turn.
-//! - (The README lists the remaining non-goals: no runtime delivery /
-//!   bundling, no crates.io publish, no TypeScript-parity helper.)
+//! - (The README's Known limitations list the remaining non-goals: no
+//!   runtime binary delivery / bundling / download, no version
+//!   negotiation.)
 
 pub mod api;
 pub mod client;
