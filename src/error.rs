@@ -41,8 +41,11 @@ pub enum Error {
         data: Option<Value>,
     },
 
-    /// The runtime binary is missing or not launchable.
-    #[error("runtime is missing or not launchable: {0}")]
+    /// No runtime binary could be resolved: no `dsh_bin` and no non-empty
+    /// `DSH_RUNTIME_BIN` (spec §7). Reserved for unresolved acquisition
+    /// (spec §8); a configured program that fails to spawn is
+    /// [`Error::Io`](Error::Io).
+    #[error("no runtime binary could be resolved: {0}")]
     RuntimeNotFound(String),
 
     /// A configuration error: the caller's [`Config`](crate::runtime::Config)
@@ -133,7 +136,7 @@ mod tests {
         let err = Error::RuntimeNotFound("no dsh runtime on PATH".into());
         assert_eq!(
             err.to_string(),
-            "runtime is missing or not launchable: no dsh runtime on PATH"
+            "no runtime binary could be resolved: no dsh runtime on PATH"
         );
     }
 

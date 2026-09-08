@@ -3,7 +3,6 @@
 
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::io;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -29,6 +28,18 @@ use super::{
     closed_error, lock, try_register_pending, PendingRequests, SharedState,
     DEFAULT_BROADCAST_CAPACITY,
 };
+
+/// The environment keys the crate MUST never write into the child
+/// environment, under any configuration (spec §4.2). None has a reader
+/// upstream: the bundled `cordis.yml` consuming `DSH_CORDIS_CONFIG` was
+/// deleted, sessions live under `$DSH_HOME/sessions`, and the workspace cwd
+/// reaches the runtime through `initialize.cwd` (spec §4.2 evidence).
+///
+/// Enforced at the spawn layer — the child inherits the parent environment
+/// wholesale, so the keys are stripped from the inherited env here — and in
+/// the compose filter (`crate::runtime::compose_env_with_home`).
+pub(crate) const FORBIDDEN_ENV_KEYS: [&str; 3] =
+    ["DSH_CORDIS_CONFIG", "DSH_SESSION_ROOT", "DSH_CWD"];
 
 /// How to launch the runtime process (the official
 /// `deepseek-harness-sdk-runtime` binary).
@@ -150,17 +161,25 @@ impl HarnessClient {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // Spec §4.2: the three forbidden keys MUST NOT reach the child under
+        // any configuration. The override set filters them from
+        // `Config::env`, but the child also inherits the parent environment
+        // wholesale — strip them here so a parent-exported
+        // `DSH_CORDIS_CONFIG` / `DSH_SESSION_ROOT` / `DSH_CWD` can never
+        // leak into the runtime (AC1). The rest of the parent env is
+        // inherited untouched (no `env_clear`).
+        for key in FORBIDDEN_ENV_KEYS {
+            command.env_remove(key);
+        }
         if let Some(cwd) = &spec.cwd {
             command.current_dir(cwd);
         }
+        // A spawn failure — including ENOENT for a configured-but-missing
+        // program — is an I/O error (spec §7). `Error::RuntimeNotFound` is
+        // reserved for "no runtime could be resolved" (spec §8), which
+        // `resolve_runtime` reports before spawn.
         let mut child = match command.spawn() {
             Ok(child) => child,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                return Err(Error::RuntimeNotFound(format!(
-                    "{}: {err}",
-                    spec.program.display()
-                )));
-            }
             Err(err) => return Err(Error::Io(err)),
         };
         let stdin = child

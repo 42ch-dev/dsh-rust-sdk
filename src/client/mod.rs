@@ -26,6 +26,7 @@ mod subscription;
 
 // The public surface, re-exported so `client::*` paths (and the crate-level
 // re-exports in `lib.rs`) are unchanged by the split.
+pub(crate) use self::core::FORBIDDEN_ENV_KEYS;
 pub use self::core::{ClientTimeouts, HarnessClient, LaunchSpec};
 pub use self::subscription::NotificationSubscription;
 
