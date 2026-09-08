@@ -4,6 +4,7 @@ problem_type: best_practice
 category: best-practices
 module: release-pipeline
 date: 2026-08-17
+last_updated: 2026-09-08
 severity: high
 plan_id: 03-release-pipeline
 tags:
@@ -52,6 +53,12 @@ v0.2 shipped a two-step, PR-driven release pipeline for `deepseek-harness-sdk` (
 - Refuse-empty lives in **three layers** on purpose: prepare refuses 0 fragments; `release-notes` exits 1 on missing section; workflows grep for `^[[:space:]]*- ` (header-only sections must be treated as empty — `release-notes` alone exits 0 on those).
 - Auto-bump must stay on the prerelease line: `X.Y.Z-pre.N → X.Y.Z-pre.(N+1)` (numeric tail only; non-numeric tail → demand explicit version). Reject build metadata on explicit input (crates.io won't publish `+build` versions).
 - Committed CHANGELOG sections should be byte-reproducible from the archived fragments — keep a regression test asserting it.
+
+**Fragment authoring lessons (iteration `003-upstream-launch-contract`, 2026-09-08):**
+- **One file per change group with a single `category:` frontmatter.** A change spanning several categories (e.g. `Removed` + `Changed` + `Added`) is split into per-category files, not one file with `###` sections. The assembler renders body lines verbatim under the generated `### <category>` heading, so an in-body `###` heading survives as literal text — the wrong changelog.
+- **Body lines render verbatim; author them as `- ` bullets.** The assembler never re-parses the body, so anything else in the body (headings, prose blocks, process notes) lands in CHANGELOG.md verbatim.
+- **An unreleased fragment can become factually false before assembly.** A later change can remove the thing an earlier fragment describes. This iteration's launch-contract realignment made `runtime-acquisition-routes.md` ("the interactive `dsh` CLI is not the SDK runtime") and `runtime-wheel-rg-sidecar.md` (a cordis-config reference) false; both were corrected minimally before assembly. Re-check unreleased fragments whenever a change lands that touches their claims — they have not shipped and must not enter the changelog as false statements.
+- **A fragment is consumer-facing.** It is changelog prose for users, not a process log: test counts, QC rounds, and internal git ranges do not belong (enforced by review, not by the assembler).
 
 **Workflow/tooling details that bit us:** machine-global `tag.gpgSign=true` breaks git fixtures in tests (use `-c tag.gpgSign=false`); `cargo xtask` alias needs a committed `.cargo/config.toml`; a root-package workspace needs `default-members = [".", "xtask"]` for plain `cargo test` to cover xtask; `cargo publish -p <name>` only (never bare `--workspace`); keep xtask out of the crate `include` allowlist; rust-cache `shared-key` must match ci.yml for the verify jobs to reuse PR cache.
 
