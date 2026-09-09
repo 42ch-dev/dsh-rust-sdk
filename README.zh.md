@@ -97,15 +97,15 @@ crate 注入了覆盖值，运行时从环境中继承 `DEEPSEEK_BASE_URL` /
 ### 途径 A —— npm 发布的 CLI（推荐）
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.1.3-alpha.2
+npm install -g @deepseek-ai/dsh
 export DSH_RUNTIME_BIN="$(command -v dsh)"
 ```
 
-`dsh` CLI 以 `@deepseek-ai/dsh` 发布在 npm 上。请安装上面的精确 pin：它是
-CI 针对本 crate 验证的版本，也是最接近本 crate 验证所依据的契约基线的
-已发布工件。裸的 `npm install -g @deepseek-ai/dsh` 会安装 `latest`
-dist-tag，它目前停留在 `0.1.2-rc.1`（早于该基线）；`alpha` dist-tag 更
-新，但未经本 crate 验证。
+`dsh` CLI 以 `@deepseek-ai/dsh` 发布在 npm 上。裸的
+`npm install -g @deepseek-ai/dsh` 会安装 `latest` dist-tag，它可能落后于
+上游最新发布；`npm install -g @deepseek-ai/dsh@alpha` 则跟随最新版本。
+本 crate 的 CI 在每个 pull request 上用 keyless 握手验证 npm 路线，被测的
+确切版本记录在 `.github/workflows/ci.yml`。
 
 安装的 bin 是 Node.js 脚本，因此 **Node.js 必须在 `PATH` 上**，SDK 才能
 启动它。crate 直接启动解析出的程序（不经 shell），而 npm bin 是 Node.js

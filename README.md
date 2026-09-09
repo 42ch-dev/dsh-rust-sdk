@@ -102,16 +102,16 @@ Three routes to a runtime:
 ### Route A — the npm-published CLI (recommended)
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.1.3-alpha.2
+npm install -g @deepseek-ai/dsh
 export DSH_RUNTIME_BIN="$(command -v dsh)"
 ```
 
-The `dsh` CLI is published on npm as `@deepseek-ai/dsh`. Install the exact
-pin above: it is the version CI verifies against this crate and the closest
-published artifact to the contract basis the crate was verified against. A
-bare `npm install -g @deepseek-ai/dsh` installs the `latest` dist-tag, which
-currently lags at `0.1.2-rc.1` (older than that basis); the `alpha` dist-tag
-is newer but is not verified against this crate.
+The `dsh` CLI is published on npm as `@deepseek-ai/dsh`. A bare
+`npm install -g @deepseek-ai/dsh` installs the `latest` dist-tag, which can
+lag behind upstream's newest release; `npm install -g @deepseek-ai/dsh@alpha`
+tracks the newest. This crate's CI verifies the npm route with a keyless
+handshake on every pull request, and the exact version under test lives in
+`.github/workflows/ci.yml`.
 
 The installed bin is a Node.js script, so **Node.js must be on `PATH`** for
 the SDK to launch it. The crate spawns the resolved program directly without
