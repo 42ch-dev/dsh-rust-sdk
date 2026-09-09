@@ -1,6 +1,6 @@
 # DSH runtime launch, home, and configuration contract
 
-**Status:** Frozen (iteration `003-upstream-launch-contract`, 2026-09-08)
+**Status:** Frozen (2026-09-08)
 **Scope:** repo-level normative contract for how `deepseek-harness-sdk` resolves, launches, and configures a DSH runtime process.
 **Upstream basis:** `deepseek-harness` @ `c389f96bf3a9b6807cb71ed6bdad5849be0df6d8` (`dsh-v0.1.3-alpha.2-133-gc389f96bf3`, 2026-09-08), re-verified line by line on 2026-09-08. Every contract statement below cites `path:line` at that ref.
 **Normative language:** `MUST` / `MUST NOT` are contract; `SHOULD` is strong guidance that a deviation must justify. Prose without these words is rationale.
@@ -208,12 +208,12 @@ The crate MUST keep its existing typed taxonomy (`src/error.rs:8-55`) and map la
 
 ## 8. Durable roadmap interaction (deferred scope)
 
-This section records the long-term contract interaction with the **deferred** roadmap item `runtime-bin-delivery`. It is normative for what this spec permits later; it is **not** in scope for iteration `003-upstream-launch-contract`.
+This section records the long-term contract interaction with the **deferred** roadmap item `runtime-bin-delivery`. It is normative for what this spec permits later; it is **not** in scope for this spec's current obligations.
 
 - The launch model locked here (program + `--profile` + ordered `--patch` + resolved `DSH_HOME`) is the model schemes **B** (companion crate embedding a prebuilt runtime) and **C** (first-run download from GitHub Releases) MUST build on. Neither scheme may introduce a second launch grammar; both MUST populate `Config::dsh_bin` (or resolve the program internally) and leave argv composition unchanged.
 - `DSH_RUNTIME_BIN` (AC10) remains the env override for the acquisition scheme **A** in use today. Scheme B/C MUST keep it working and MUST NOT repurpose it as a cache path.
 - `Error::RuntimeNotFound` stays reserved for "no runtime could be resolved": under scheme B/C it is emitted only for an unsupported OS/arch or a failed artifact fetch, never for a normal launch failure.
-- The scheme choice (B **or** C, never both), the platform matrix, and the done definition live in the `_default` project roadmap (`{PROJECT_DIR}/_default/roadmap.md` § Deferred, row `runtime-bin-delivery`) and must be locked in that iteration's compass before implementation.
+- The scheme choice (B **or** C, never both), the platform matrix, and the done definition live in the `_default` project roadmap (`{PROJECT_DIR}/_default/roadmap.md` § Deferred, row `runtime-bin-delivery`) and must be locked before implementation.
 - Until that trigger fires, the crate MUST NOT bundle, download, or ship a runtime (§1), and MUST NOT document acquisition as delivered.
 
 ---

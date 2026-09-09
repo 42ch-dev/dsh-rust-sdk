@@ -2,10 +2,10 @@
 
 Repo-level normative specs (`{SPECS_DIR}` = `.mstar/specs/`): frozen, cross-iteration contracts. Iteration-scoped drafts belong in `.mstar/iterations/<iteration-id>/specs/`; implementation SSOT belongs in `.mstar/knowledge/`.
 
-| Spec | Status | Scope | Owning plans | Iteration |
-|------|--------|-------|--------------|-----------|
-| [`dsh-runtime-launch-contract.md`](dsh-runtime-launch-contract.md) | Frozen (2026-09-08) | Launch grammar, `DSH_HOME` resolution + Python divergence, child environment, removal list with replacements, `Config` / `RunResult` field sets, error semantics, deferred `runtime-bin-delivery` interaction, verification obligations | 05-runtime-launch-contract (primary); 07-docs-and-live-verification (documents it) | `003-upstream-launch-contract` |
-| [`dsh-sdk-wire-parity-surface.md`](dsh-sdk-wire-parity-surface.md) | Frozen (2026-09-08) | Request methods, notifications, session-tree semantics, content-block vocabulary incl. `file`, field-level Python-parity tables, `reasoningEffort` omit-when-unset, bounded `initialize`, notification callback, documented divergences | 06-wire-parity-additions (primary); 07-docs-and-live-verification (primary) | `003-upstream-launch-contract` |
+| Spec | Status | Scope |
+|------|--------|-------|
+| [`dsh-runtime-launch-contract.md`](dsh-runtime-launch-contract.md) | Frozen (2026-09-08) | Launch grammar, `DSH_HOME` resolution + Python divergence, child environment, removal list with replacements, `Config` / `RunResult` field sets, error semantics, deferred `runtime-bin-delivery` interaction, verification obligations |
+| [`dsh-sdk-wire-parity-surface.md`](dsh-sdk-wire-parity-surface.md) | Frozen (2026-09-08) | Request methods, notifications, session-tree semantics, content-block vocabulary incl. `file`, field-level Python-parity tables, `reasoningEffort` omit-when-unset, bounded `initialize`, notification callback, documented divergences |
 
 ## Reading rules
 

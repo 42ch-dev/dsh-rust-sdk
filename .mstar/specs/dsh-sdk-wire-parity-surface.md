@@ -1,6 +1,6 @@
 # DSH SDK wire-parity surface
 
-**Status:** Frozen (iteration `003-upstream-launch-contract`, 2026-09-08)
+**Status:** Frozen (2026-09-08)
 **Scope:** repo-level normative contract for the `deepseek-harness-sdk` wire surface — request methods, server notifications, content-block vocabulary, the `Config` / `RunResult` field set, defaults, and documented divergences from the reference clients.
 **Upstream basis:** `deepseek-harness` @ `c389f96bf3a9b6807cb71ed6bdad5849be0df6d8` (`dsh-v0.1.3-alpha.2-133-gc389f96bf3`, 2026-09-08), re-verified line by line on 2026-09-08. Every contract statement below cites `path:line` at that ref.
 **Alignment baseline:** the **Python SDK** is the parity baseline (`python/sdk`); the **TypeScript SDK** is the design twin (`packages/sdk/client`). Where they disagree, the crate follows Python unless a divergence is recorded here (§7).
@@ -101,7 +101,7 @@ The rustdoc "known variants" count MUST say six, not five.
 - `assistant/attempt` was added (`packages/core/session/src/types.ts:319`).
 - `assistant/chunk` was removed.
 
-Because the crate keeps `session.event.event` untyped (§3.2), the run path is unaffected: `final_response` reads the last root `assistant/message`'s `data.message.content`, and `finish_reason` reads the last root `turn/end`'s `data.reason.kind`. The crate MUST NOT claim `assistant/chunk` support and MUST NOT parse the embedded v2 stream this iteration (non-goal). Documentation MUST state the v2 vocabulary.
+Because the crate keeps `session.event.event` untyped (§3.2), the run path is unaffected: `final_response` reads the last root `assistant/message`'s `data.message.content`, and `finish_reason` reads the last root `turn/end`'s `data.reason.kind`. The crate MUST NOT claim `assistant/chunk` support and MUST NOT parse the embedded v2 stream (non-goal). Documentation MUST state the v2 vocabulary.
 
 ---
 
@@ -212,7 +212,7 @@ The crate requires exact equality with `deepseek-harness-sdk-runtime` (`packages
 
 ### 7.5 Rust-only ergonomics
 
-No `DeepSeekHarness::run` convenience and no lazy start: the crate requires an explicit `DeepSeekHarness::start`. Python has both a `run` convenience and lazy start (`python/sdk/src/deepseek_harness/api.py:121,124-131`); TypeScript lazily starts inside `run` (`packages/sdk/client/src/api.ts:177`). The divergence is documented in the crate's README and stays a non-goal this iteration.
+No `DeepSeekHarness::run` convenience and no lazy start: the crate requires an explicit `DeepSeekHarness::start`. Python has both a `run` convenience and lazy start (`python/sdk/src/deepseek_harness/api.py:121,124-131`); TypeScript lazily starts inside `run` (`packages/sdk/client/src/api.ts:177`). The divergence is documented in the crate's README and stays a non-goal.
 
 ---
 

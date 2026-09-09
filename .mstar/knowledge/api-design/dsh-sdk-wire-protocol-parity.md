@@ -5,7 +5,6 @@ last_updated: 2026-09-08
 problem_type: api_design
 category: api-design
 severity: high
-plan_id: 02-highlevel-api-runtime
 tags:
   - dsh
   - wire-protocol
@@ -14,7 +13,7 @@ tags:
   - sdk-client
 applies_when:
   - Maintaining or extending the deepseek-harness-sdk client (protocol, client, api layers)
-  - Building the runtime-bin companion crate (next iteration)
+  - Building the runtime-bin companion crate (future)
   - Debugging Session::run activity-interval behavior against the DSH runtime
 related_components:
   - src/protocol.rs
@@ -76,4 +75,3 @@ Every one of the three traps produces a client that **compiles, passes surface-l
 
 - `tests/run_semantics.rs` (16 tests) pins the interval algorithm: receipt gating, pre-receipt drop, non-root idle ignored, transport ordering, fail-fast arms.
 - `tests/client_lifecycle.rs` (19 tests) pins transport/client behavior incl. malformed-line tolerance and close-ladder escalation.
-- Source doc promoted from: `iteration:v0.1/specs/python-parity-surface.md` (structured rewrite; the iteration spec remains the frozen v0.1 snapshot).
