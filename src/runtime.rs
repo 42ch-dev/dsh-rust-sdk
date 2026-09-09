@@ -49,13 +49,16 @@ use crate::client::{ClientTimeouts, FORBIDDEN_ENV_KEYS};
 use crate::error::Error;
 
 /// Acquisition hints embedded in [`Error::RuntimeNotFound`] when no runtime
-/// binary is configured anywhere. Names the bring-your-own route and the
-/// build-from-source route; must never advertise a not-yet-published Rust
-/// companion crate or a Python wheel as a v0.1 install path.
+/// binary is configured anywhere. Names the bring-your-own route, the
+/// npm-published `dsh` CLI route, and the build-from-source route; must
+/// never advertise a not-yet-published Rust companion crate or a Python
+/// wheel as a v0.1 install path.
 const RUNTIME_NOT_FOUND_HINT: &str = "no DeepSeek Harness runtime binary is configured. \
 Bring your own: set DSH_RUNTIME_BIN (or Config::dsh_bin) to a runtime binary you already \
-have, or build the official runtime from the deepseek-harness repository \
-(https://github.com/deepseek-ai/deepseek-harness) with \
+have, install the npm-published dsh CLI (@deepseek-ai/dsh) with \
+`npm install -g @deepseek-ai/dsh` and point DSH_RUNTIME_BIN at it (the bin is a Node.js \
+script, so Node.js must be on PATH), or build the official runtime from the \
+deepseek-harness repository (https://github.com/deepseek-ai/deepseek-harness) with \
 `scripts/build-exe-for-python-sdk.ts` and point DSH_RUNTIME_BIN at the built executable";
 
 /// High-level launch configuration, mirroring Python
@@ -214,8 +217,10 @@ pub struct RuntimeLaunch {
 ///
 /// 1. `Config::dsh_bin` (non-empty);
 /// 2. `DSH_RUNTIME_BIN` from the parent environment;
-/// 3. [`Error::RuntimeNotFound`] whose message names both acquisition routes
-///    (bring-your-own, and building the official runtime via
+/// 3. [`Error::RuntimeNotFound`] whose message names the three acquisition
+///    routes (bring-your-own, the npm-published `dsh` CLI via
+///    `npm install -g @deepseek-ai/dsh` — the bin is a Node.js script, so
+///    Node.js must be on `PATH` — and building the official runtime via
 ///    `scripts/build-exe-for-python-sdk.ts`) and cites
 ///    <https://github.com/deepseek-ai/deepseek-harness>.
 ///
@@ -773,13 +778,17 @@ mod tests {
     }
 
     #[test]
-    fn resolve_missing_everywhere_has_both_routes_and_github_url() {
+    fn resolve_missing_everywhere_has_three_routes_and_github_url() {
         let empty_env = HashMap::new();
         let err = resolve_runtime_with(&Config::default(), lookup(&empty_env)).unwrap_err();
         let message = err.to_string();
         assert!(
             message.contains("DSH_RUNTIME_BIN"),
             "bring-your-own route hint missing: {message}"
+        );
+        assert!(
+            message.contains("npm install -g @deepseek-ai/dsh"),
+            "npm route hint missing: {message}"
         );
         assert!(
             message.contains("scripts/build-exe-for-python-sdk.ts"),
