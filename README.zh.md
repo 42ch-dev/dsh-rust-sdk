@@ -41,9 +41,6 @@ deepseek-harness-sdk = "*"
 
 版本由你选择（`cargo search deepseek-harness-sdk` 或
 [crates.io 页面](https://crates.io/crates/deepseek-harness-sdk) 可查最新版）。
-crate 处于预发布线时，裸的 `cargo add deepseek-harness-sdk` 可能不会解析到
-最新的预发布版本——需要时请显式指定（例如
-`cargo add deepseek-harness-sdk@0.1.0-alpha`）。`0.1.0` 之前 API 仍可能变化。
 
 首次运行前的两个前置条件：一个 DSH 运行时（见
 [运行时获取](#运行时获取)）与模型凭据（环境变量 `DEEPSEEK_API_KEY`，或
