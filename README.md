@@ -43,10 +43,7 @@ deepseek-harness-sdk = "*"
 
 Pick the version that suits you (`cargo search deepseek-harness-sdk` or the
 [crates.io page](https://crates.io/crates/deepseek-harness-sdk) shows the
-latest). While the crate is on a pre-release line, a bare
-`cargo add deepseek-harness-sdk` may not resolve to the newest pre-release —
-request it explicitly (e.g. `cargo add deepseek-harness-sdk@0.1.0-alpha`) when
-you want it. The API may still change before `0.1.0`.
+latest).
 
 Two prerequisites before the first run: a DSH runtime (see
 [Runtime acquisition](#runtime-acquisition)) and model credentials
