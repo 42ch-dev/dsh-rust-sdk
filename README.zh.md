@@ -92,18 +92,27 @@ crate 注入了覆盖值，运行时从环境中继承 `DEEPSEEK_BASE_URL` /
 普通的 `dsh` CLI，在 `sdk` profile 下启动（或用 `Config::profile` 指定
 任意 profile）。
 
-上游把运行时打包为自包含的 Node.js 单文件可执行文件（运行时不需要系统
-Node.js；插件树已内嵌），经 `deepseek-harness-runtime-bin` 平台 wheel
-分发——wheel 安装的是普通 `dsh` CLI，名为
-`deepseek-harness-sdk-runtime-<platform>-<arch>`。已发布目标为 **Linux
-x64、Linux arm64、macOS arm64、macOS x64、Windows x64**（Windows 使用
-`.exe` 后缀）。macOS 需要可执行文件旁的伴生 `-spawn-helper`
-（`node-pty`），Linux/macOS wheel 携带 `-rg` ripgrep 伴随文件（Windows 为
-`-rg.exe`）——移动可执行文件时请把伴随文件一并复制。
-
 三条获取途径：
 
-### 途径 A —— 平台 wheel（推荐）
+### 途径 A —— npm 发布的 CLI（推荐）
+
+```sh
+npm install -g @deepseek-ai/dsh
+export DSH_RUNTIME_BIN="$(command -v dsh)"
+```
+
+`dsh` CLI 以 `@deepseek-ai/dsh` 发布在 npm 上。裸的
+`npm install -g @deepseek-ai/dsh` 会安装 `latest` dist-tag，它可能落后于
+上游最新发布；`npm install -g @deepseek-ai/dsh@alpha` 则跟随最新版本。
+本 crate 的 CI 在每个 pull request 上用 keyless 握手验证 npm 路线，被测的
+确切版本记录在 `.github/workflows/ci.yml`。
+
+安装的 bin 是 Node.js 脚本，因此 **Node.js 必须在 `PATH` 上**，SDK 才能
+启动它。crate 直接启动解析出的程序（不经 shell），而 npm bin 是 Node.js
+脚本而非原生可执行文件——在 Windows 上请优先使用自包含的 wheel 途径
+（途径 B）。
+
+### 途径 B —— 平台 wheel（自包含，无需 Node.js）
 
 ```sh
 python -m pip install deepseek-harness-runtime-bin
@@ -114,27 +123,24 @@ export DSH_RUNTIME_BIN="$(python -c 'import deepseek_harness_runtime as r; print
 运行时不跑任何 Python**。SDK 直接启动该可执行文件（始终注入解析后的
 `DSH_HOME`，因此即使首次启动主目录也是显式的）。
 
-### 途径 B —— 从源码构建
+wheel 把运行时打包为自包含的单文件可执行文件——运行时不需要系统
+Node.js（插件树已内嵌）——并安装普通的 `dsh` CLI，名为
+`deepseek-harness-sdk-runtime-<platform>-<arch>`。已发布目标为 **Linux
+x64、Linux arm64、macOS arm64、Windows x64**（Windows 使用 `.exe`
+后缀）；**macOS x64 未发布**——该平台请使用途径 C。macOS 需要可执行
+文件旁的伴生 `-spawn-helper`（`node-pty`），Linux/macOS wheel 携带
+`-rg` ripgrep 伴随文件（Windows 为 `-rg.exe`）——移动可执行文件时请把
+伴随文件一并复制。由于 wheel 运行时不依赖系统 Node.js，它仍是 Windows
+及无法安装 Node.js 的用户的备选途径。
+
+### 途径 C —— 从源码构建
 
 用[官方仓库](https://github.com/deepseek-ai/deepseek-harness)中的
 `build-exe-for-python-sdk` 脚本构建运行时可执行文件，然后把
-`DSH_RUNTIME_BIN`（或 `Config::dsh_bin`）指向构建产物。当已发布的 wheel
-不覆盖你的平台时，使用这条途径。
-
-### 途径 C —— npm 发布的 CLI
-
-```sh
-npm install -g @deepseek-ai/dsh
-export DSH_RUNTIME_BIN="$(command -v dsh)"
-```
-
-`dsh` CLI 以 `@deepseek-ai/dsh` 发布在 npm 上。裸的
-`npm install -g @deepseek-ai/dsh` 安装 `latest` dist-tag；
-`npm install -g @deepseek-ai/dsh@alpha` 安装最新的 `alpha` 版本。安装的
-bin 是 Node.js 脚本，因此 **Node.js 必须在 `PATH` 上**，SDK 才能启动它。
-crate 直接启动解析出的程序（不经 shell），而 npm bin 是 Node.js 脚本而
-非原生可执行文件——在 Windows 上请优先使用自包含的 wheel/exe 途径
-（途径 A）。
+`DSH_RUNTIME_BIN`（或 `Config::dsh_bin`）指向构建产物。从源码构建是唯一
+能精确复现本 crate 验证所依据的契约基线的途径（构建前先在官方仓库中
+`git checkout c389f96bf3`），也是没有已发布工件的平台——尤其是
+**macOS x64**（未发布 wheel）——的途径。
 
 ### SDK 如何解析运行时
 
@@ -411,8 +417,8 @@ drop-oldest 语义的广播通道。如果高流量会话树在 SDK 两次读取
 ## 平台支持与 MSRV
 
 SDK 本体是纯 Rust、平台负担很小；平台矩阵由所消费的运行时决定。上游为
-运行时发布 **5 个目标**：Linux x64、Linux arm64、macOS arm64、macOS
-x64、Windows x64（见[运行时获取](#运行时获取)）。
+运行时发布 **4 个目标**：Linux x64、Linux arm64、macOS arm64、Windows
+x64（macOS x64 未发布——见[运行时获取](#运行时获取)）。
 
 MSRV：当前 stable Rust（`Cargo.toml` 未固定最低版本；本 crate 跟随稳定版
 工具链）。
