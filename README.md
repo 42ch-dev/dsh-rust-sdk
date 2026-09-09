@@ -97,20 +97,28 @@ the ordinary `dsh` CLI from
 [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness), booted
 under the `sdk` profile (or any profile you name via `Config::profile`).
 
-Upstream packages the runtime as a self-contained Node.js single-file
-executable (no system Node.js needed at runtime; plugin tree embedded) and
-distributes it through the `deepseek-harness-runtime-bin` platform wheels,
-which install the normal `dsh` CLI as
-`deepseek-harness-sdk-runtime-<platform>-<arch>`. Published targets are
-**Linux x64, Linux arm64, macOS arm64, macOS x64, and Windows x64** (Windows
-uses the `.exe` suffix). macOS needs its sibling `-spawn-helper` beside the
-executable (`node-pty`), and the Linux/macOS wheels carry a `-rg` ripgrep
-sidecar (Windows `-rg.exe`) — copy any sidecar along when you relocate the
-executable.
-
 Three routes to a runtime:
 
-### Route A — the platform wheel (recommended)
+### Route A — the npm-published CLI (recommended)
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.3-alpha.2
+export DSH_RUNTIME_BIN="$(command -v dsh)"
+```
+
+The `dsh` CLI is published on npm as `@deepseek-ai/dsh`. Install the exact
+pin above: it is the version CI verifies against this crate and the closest
+published artifact to the contract basis the crate was verified against. A
+bare `npm install -g @deepseek-ai/dsh` installs the `latest` dist-tag, which
+currently lags at `0.1.2-rc.1` (older than that basis); the `alpha` dist-tag
+is newer but is not verified against this crate.
+
+The installed bin is a Node.js script, so **Node.js must be on `PATH`** for
+the SDK to launch it. The crate spawns the resolved program directly without
+a shell, and the npm bin is a Node.js script rather than a native executable
+— on Windows, prefer the self-contained wheel route (Route B).
+
+### Route B — the platform wheel (self-contained, no Node.js)
 
 ```sh
 python -m pip install deepseek-harness-runtime-bin
@@ -122,29 +130,28 @@ its path — **no Python runs at SDK runtime**. The SDK launches the executable
 directly (always injecting the resolved `DSH_HOME`, so the home is explicit
 even on first boot).
 
-### Route B — build from source
+The wheel ships the runtime as a self-contained single-file executable — no
+system Node.js needed at runtime (the plugin tree is embedded) — and installs
+the normal `dsh` CLI as `deepseek-harness-sdk-runtime-<platform>-<arch>`.
+Published targets are **Linux x64, Linux arm64, macOS arm64, and Windows
+x64** (Windows uses the `.exe` suffix); **macOS x64 is not published** — on
+that platform use Route C. macOS needs its sibling `-spawn-helper` beside the
+executable (`node-pty`), and the Linux/macOS wheels carry a `-rg` ripgrep
+sidecar (Windows `-rg.exe`) — copy any sidecar along when you relocate the
+executable. Because the wheel needs no system Node.js at runtime, it stays
+the fallback for Windows and for users who cannot install Node.js.
+
+### Route C — build from source
 
 Build the runtime executable from source with the
 `build-exe-for-python-sdk` script from the
 [official repository](https://github.com/deepseek-ai/deepseek-harness), then
-point `DSH_RUNTIME_BIN` (or `Config::dsh_bin`) at the built executable. This
-is the route to use when the published wheel does not cover your platform.
-
-### Route C — the npm-published CLI
-
-```sh
-npm install -g @deepseek-ai/dsh
-export DSH_RUNTIME_BIN="$(command -v dsh)"
-```
-
-The `dsh` CLI is published on npm as `@deepseek-ai/dsh`. A bare
-`npm install -g @deepseek-ai/dsh` installs the `latest` dist-tag;
-`npm install -g @deepseek-ai/dsh@alpha` installs the newest `alpha`
-release. The installed bin is a Node.js script, so **Node.js must be on
-`PATH`** for the SDK to launch it. The crate spawns the resolved program
-directly without a shell, and the npm bin is a Node.js script rather than
-a native executable — on Windows, prefer the self-contained wheel/exe
-route (Route A).
+point `DSH_RUNTIME_BIN` (or `Config::dsh_bin`) at the built executable.
+Building from source is the only route that reproduces the exact contract
+basis this crate was verified against (`git checkout c389f96bf3` in the
+official repository before building), and it is the route for platforms
+without a published artifact — notably **macOS x64**, for which no wheel is
+published.
 
 ### How the SDK resolves the runtime
 
@@ -454,9 +461,9 @@ Each row names what it was and what replaces it:
 ## Platform support & MSRV
 
 The SDK itself is pure Rust and platform-light; the consumed runtime decides
-the platform matrix. Upstream publishes the runtime for **5 targets**: Linux
-x64, Linux arm64, macOS arm64, macOS x64, and Windows x64 (see
-[Runtime acquisition](#runtime-acquisition)).
+the platform matrix. Upstream publishes the runtime for **4 targets**: Linux
+x64, Linux arm64, macOS arm64, and Windows x64 (macOS x64 is not published —
+see [Runtime acquisition](#runtime-acquisition)).
 
 MSRV: current stable Rust (no minimum is pinned in `Cargo.toml`; the crate
 tracks the stable toolchain).

@@ -50,13 +50,14 @@ use crate::error::Error;
 
 /// Acquisition hints embedded in [`Error::RuntimeNotFound`] when no runtime
 /// binary is configured anywhere. Names the bring-your-own route, the
-/// npm-published `dsh` CLI route, and the build-from-source route; must
+/// npm-published `dsh` CLI route (recommended, pinned to
+/// `@deepseek-ai/dsh@0.1.3-alpha.2`), and the build-from-source route; must
 /// never advertise a not-yet-published Rust companion crate or a Python
 /// wheel as a v0.1 install path.
 const RUNTIME_NOT_FOUND_HINT: &str = "no DeepSeek Harness runtime binary is configured. \
 Bring your own: set DSH_RUNTIME_BIN (or Config::dsh_bin) to a runtime binary you already \
-have, install the npm-published dsh CLI (@deepseek-ai/dsh) with \
-`npm install -g @deepseek-ai/dsh` and point DSH_RUNTIME_BIN at it (the bin is a Node.js \
+have, install the recommended npm-published dsh CLI (@deepseek-ai/dsh) with \
+`npm install -g @deepseek-ai/dsh@0.1.3-alpha.2` and point DSH_RUNTIME_BIN at it (the bin is a Node.js \
 script, so Node.js must be on PATH), or build the official runtime from the \
 deepseek-harness repository (https://github.com/deepseek-ai/deepseek-harness) with \
 `scripts/build-exe-for-python-sdk.ts` and point DSH_RUNTIME_BIN at the built executable";
@@ -218,10 +219,10 @@ pub struct RuntimeLaunch {
 /// 1. `Config::dsh_bin` (non-empty);
 /// 2. `DSH_RUNTIME_BIN` from the parent environment;
 /// 3. [`Error::RuntimeNotFound`] whose message names the three acquisition
-///    routes (bring-your-own, the npm-published `dsh` CLI via
-///    `npm install -g @deepseek-ai/dsh` — the bin is a Node.js script, so
-///    Node.js must be on `PATH` — and building the official runtime via
-///    `scripts/build-exe-for-python-sdk.ts`) and cites
+///    routes (bring-your-own; the recommended npm-published `dsh` CLI via
+///    `npm install -g @deepseek-ai/dsh@0.1.3-alpha.2` — the bin is a Node.js
+///    script, so Node.js must be on `PATH`; and building the official
+///    runtime via `scripts/build-exe-for-python-sdk.ts`) and cites
 ///    <https://github.com/deepseek-ai/deepseek-harness>.
 ///
 /// The argv is composed from the launch grammar `dsh --profile <name>
@@ -787,8 +788,8 @@ mod tests {
             "bring-your-own route hint missing: {message}"
         );
         assert!(
-            message.contains("npm install -g @deepseek-ai/dsh"),
-            "npm route hint missing: {message}"
+            message.contains("npm install -g @deepseek-ai/dsh@0.1.3-alpha.2"),
+            "pinned npm route hint missing: {message}"
         );
         assert!(
             message.contains("scripts/build-exe-for-python-sdk.ts"),
