@@ -46,7 +46,7 @@ Contract facts are verified **against the upstream runtime source at a pinned re
 - Pin an upstream commit and cite `path:line` for every contract statement — the two specs cite `c389f96bf3` throughout. A moved line is not a contract change; a changed rule is. Re-run the specs' re-verification greps when upstream advances (launch spec §10, wire spec §10).
 - Treat both official SDKs as **clients**, not as the authority: a wrapper can carry its own divergence from the runtime (Python raises `ValueError` on a missing `DSH_HOME`; the runtime itself falls back to `~/.dsh` — launch spec §3.3).
 - Re-verify in passes that classify each fact as **still true** vs **no longer true** and record what changed. The 2026-09-08 re-verification at `c389f96bf3` found the wire surface unchanged but the launch/env/config contract replaced (the runtime became `dsh --profile <name>` with a resolved `DSH_HOME`, and the old `DSH_CORDIS_CONFIG` / `DSH_SESSION_ROOT` / `DSH_CWD` knobs lost their readers) — which is why the contract half now lives in the specs.
-- Keep the reusable facts in durable docs; the audit reports behind them (`.mstar/projects/_default/references/rust-sdk-analysis/`) are evidence, not the source of truth.
+- Keep the reusable facts in durable docs; one-off audit reports are evidence, not the source of truth.
 
 ### The three traps (each corrected a wrong plan line)
 
@@ -68,7 +68,7 @@ Every one of the three traps produces a client that **compiles, passes surface-l
 ## When to Apply
 
 - New protocol methods or notification types: extend `src/protocol.rs` with Unknown-tolerant parsing; never `deny_unknown_fields` (wire spec §5.2).
-- Runtime-bin companion crate (durable item `runtime-bin-delivery`, tracked in `.mstar/projects/_default/roadmap.md` § Deferred): platform matrix is linux-x64 / linux-arm64 / macos-arm64 (CI publishes exactly these three; macOS needs the sibling `-spawn-helper`).
+- Runtime-bin companion crate (deferred item `runtime-bin-delivery`): platform matrix is linux-x64 / linux-arm64 / macos-arm64 (CI publishes exactly these three; macOS needs the sibling `-spawn-helper`).
 - Protocol bumps (`serverInfo.version` leaving 0.0.1): revisit the strict-name check and the no-negotiation stance together (wire spec §7.4).
 
 ## Examples

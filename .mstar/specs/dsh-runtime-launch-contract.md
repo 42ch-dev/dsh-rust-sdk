@@ -49,7 +49,7 @@ Both reference clients compose exactly this argv:
 5. Patch paths MUST be resolved to absolute paths before spawn, matching both references (Python `Path(patch).expanduser().resolve()` — `python/sdk/src/deepseek_harness/client.py:483-484`; TS `resolve(callerCwd, path)` — `packages/sdk/client/src/launch.ts:137-140`).
 6. An empty `profile` value MUST be rejected locally with a configuration error rather than launched; the runtime rejects it too (`apps/cli/src/args.ts:149`), and a local rejection keeps the failure attributable.
 
-**Rationale.** The old bare-program spawn (`args: []`) is not a valid `dsh` invocation: the child exits 1 before any JSON-RPC frame exists (`apps/cli/src/args.ts:144-146`; PM live probe in `references/rust-sdk-analysis/consolidated-verdict.md` §"PM live verification"). A launch that omits `--profile` cannot produce a session.
+**Rationale.** The old bare-program spawn (`args: []`) is not a valid `dsh` invocation: the child exits 1 before any JSON-RPC frame exists (`apps/cli/src/args.ts:144-146`). A launch that omits `--profile` cannot produce a session.
 
 ---
 
@@ -213,7 +213,7 @@ This section records the long-term contract interaction with the **deferred** ro
 - The launch model locked here (program + `--profile` + ordered `--patch` + resolved `DSH_HOME`) is the model schemes **B** (companion crate embedding a prebuilt runtime) and **C** (first-run download from GitHub Releases) MUST build on. Neither scheme may introduce a second launch grammar; both MUST populate `Config::dsh_bin` (or resolve the program internally) and leave argv composition unchanged.
 - `DSH_RUNTIME_BIN` (AC10) remains the env override for the acquisition scheme **A** in use today. Scheme B/C MUST keep it working and MUST NOT repurpose it as a cache path.
 - `Error::RuntimeNotFound` stays reserved for "no runtime could be resolved": under scheme B/C it is emitted only for an unsupported OS/arch or a failed artifact fetch, never for a normal launch failure.
-- The scheme choice (B **or** C, never both), the platform matrix, and the done definition live in the `_default` project roadmap (`{PROJECT_DIR}/_default/roadmap.md` § Deferred, row `runtime-bin-delivery`) and must be locked before implementation.
+- The scheme choice (B **or** C, never both), the platform matrix, and the done definition are deferred scope and must be locked before implementation.
 - Until that trigger fires, the crate MUST NOT bundle, download, or ship a runtime (§1), and MUST NOT document acquisition as delivered.
 
 ---
