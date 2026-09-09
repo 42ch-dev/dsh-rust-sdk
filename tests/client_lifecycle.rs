@@ -7,15 +7,21 @@
 
 mod common;
 
+use std::ffi::OsString;
+use std::path::PathBuf;
 use std::time::Duration;
 
-use deepseek_harness_sdk::{ClientTimeouts, ContentBlock, Error, HarnessClient, LaunchSpec};
+use deepseek_harness_sdk::{
+    ClientTimeouts, Config, ContentBlock, DeepSeekHarness, Error, HarnessClient, LaunchSpec,
+};
 use serde_json::{json, Value};
+use uuid::Uuid;
 
 use common::fake_runtime::{
-    emit, emit_blank, emit_raw, emit_stderr, exit, expect, expect_frame, expect_params,
-    fake_runtime_spec, ignore_all, respond, respond_error, server_info_result, sleep_forever_bin,
-    sleep_ms, test_timeouts, FakeRuntime,
+    emit, emit_blank, emit_raw, emit_stderr, env_dump_bin, exit, expect, expect_frame,
+    expect_params, fake_runtime_path, fake_runtime_spec, harness_config, ignore_all, respond,
+    respond_error, server_info_result, sleep_forever_bin, sleep_ms, test_temp_root, test_timeouts,
+    FakeRuntime,
 };
 
 /// The canonical client-side session ids used across scenarios.
@@ -25,7 +31,7 @@ const UNRELATED_SESSION: &str = "unrelated";
 
 async fn initialize_ok(rt: &mut FakeRuntime) {
     rt.client
-        .initialize("/tmp", "deepseek", "deepseek-chat", Some(1024))
+        .initialize("/tmp", "deepseek", "deepseek-chat", None, Some(1024))
         .await
         .expect("initialize succeeds");
 }
@@ -39,6 +45,7 @@ async fn initialize_happy_path_returns_server_info() {
                 "cwd": "/tmp",
                 "provider": "deepseek",
                 "model": "deepseek-chat",
+                "reasoningEffort": "high",
                 "maxTokens": 1024,
             }),
         ),
@@ -48,7 +55,13 @@ async fn initialize_happy_path_returns_server_info() {
 
     let result = rt
         .client
-        .initialize("/tmp", "deepseek", "deepseek-chat", Some(1024))
+        .initialize(
+            "/tmp",
+            "deepseek",
+            "deepseek-chat",
+            Some("high"),
+            Some(1024),
+        )
         .await
         .expect("initialize succeeds");
     assert_eq!(
@@ -70,7 +83,7 @@ async fn initialize_with_wrong_server_name_returns_sdk_protocol() {
 
     let err = rt
         .client
-        .initialize("/tmp", "deepseek", "deepseek-chat", Some(1024))
+        .initialize("/tmp", "deepseek", "deepseek-chat", None, Some(1024))
         .await
         .expect_err("initialize must reject a foreign server identity");
     assert!(
@@ -332,6 +345,111 @@ async fn request_timeout_returns_request_timeout() {
 }
 
 #[tokio::test]
+async fn initialize_timeout_bounds_handshake() {
+    // Spec §6.4 / launch spec §7: the handshake is bounded by
+    // `initialize_timeout` (not `request_timeout`). The peer accepts the
+    // initialize frame and never replies; a short bound keeps the test
+    // fast. The low-level path has no profile context, so the message names
+    // no profile here — the high-level `start()` path carries it (see
+    // `start_bounds_initialize_handshake_via_config`).
+    let spec = fake_runtime_spec(&[expect("initialize"), ignore_all()]).expect("serialize script");
+    let timeouts = ClientTimeouts {
+        initialize_timeout: Some(Duration::from_millis(200)),
+        ..test_timeouts()
+    };
+    let mut client = HarnessClient::spawn(spec, timeouts).expect("spawn fake runtime");
+
+    let started = std::time::Instant::now();
+    let err = client
+        .initialize("/tmp", "deepseek", "deepseek-chat", None, Some(1024))
+        .await
+        .expect_err("an unanswered initialize must time out");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the bound must fire promptly, not hang"
+    );
+    match &err {
+        Error::RequestTimeout {
+            method, profile, ..
+        } => {
+            assert_eq!(method, "initialize");
+            assert_eq!(
+                profile, &None,
+                "the low-level path has no profile context, so the field must be None (spec §7)"
+            );
+        }
+        other => panic!("expected RequestTimeout, got {other:?}"),
+    }
+
+    // The peer never responds; close() escalates the ladder and reaps it.
+    client.close().await.expect("close reaps the ignoring peer");
+}
+
+#[tokio::test]
+async fn start_bounds_initialize_handshake_via_config() {
+    // Spec §6.4: `Config::initialize_timeout` (default 30 s) bounds the
+    // handshake; a wedged runtime fails `start()` within the bound instead
+    // of hanging, and the error names the selected profile (spec §7).
+    let mut config =
+        harness_config(&[expect("initialize"), ignore_all()]).expect("serialize script");
+    config.initialize_timeout = Some(Duration::from_millis(200));
+
+    // The wall-clock bound is measured on the handshake alone — the
+    // `RequestTimeout` return, before the close ladder — so the timing
+    // assertion is not the tightest in the suite (qc3 S-1). `start()`
+    // runs the close ladder before propagating, so the timing is
+    // measured on the low-level handshake with the same bound the
+    // config carries; the high-level path below locks the error
+    // contract (method, profile, message).
+    let spec = fake_runtime_spec(&[expect("initialize"), ignore_all()]).expect("serialize script");
+    let timeouts = ClientTimeouts {
+        initialize_timeout: config.initialize_timeout,
+        ..test_timeouts()
+    };
+    let mut client = HarnessClient::spawn(spec, timeouts).expect("spawn fake runtime");
+    let started = std::time::Instant::now();
+    let low_err = client
+        .initialize("/tmp", "deepseek", "deepseek-chat", None, Some(1024))
+        .await
+        .expect_err("an unanswered initialize must time out");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the bound must fire promptly, not hang"
+    );
+    assert!(
+        matches!(low_err, Error::RequestTimeout { .. }),
+        "unexpected error: {low_err}"
+    );
+    client.close().await.expect("close reaps the ignoring peer");
+
+    // The high-level path: `start()` copies `Config::initialize_timeout`
+    // into the client timeouts and names the selected profile (spec §7).
+    let err = DeepSeekHarness::start(config)
+        .await
+        .expect_err("a wedged handshake must fail start() within the bound");
+    match &err {
+        Error::RequestTimeout {
+            method, profile, ..
+        } => {
+            assert_eq!(
+                method, "initialize",
+                "the method must stay the exact wire method name (spec §7): {method}"
+            );
+            assert_eq!(
+                profile.as_deref(),
+                Some("sdk"),
+                "the high-level path must carry the selected profile (spec §7)"
+            );
+            assert!(
+                err.to_string().contains("selected dsh profile 'sdk'"),
+                "the timeout message must name the selected profile: {err}"
+            );
+        }
+        other => panic!("expected RequestTimeout, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn spontaneous_death_surfaces_exit_code_and_stderr_tail() {
     // The canonical crash scenario: the runtime dies (exit 101, a Rust
     // panic-like code) while a request is in flight. The read loop's EOF
@@ -446,7 +564,7 @@ async fn close_ladder_level_one_cooperative_shutdown_and_exit() {
 #[tokio::test]
 async fn close_ladder_escalates_to_sigterm_when_peer_ignores_shutdown_and_eof() {
     let spec = LaunchSpec {
-        program: sleep_forever_bin().to_string(),
+        program: PathBuf::from(sleep_forever_bin()),
         args: vec![],
         envs: Default::default(),
         cwd: None,
@@ -471,23 +589,22 @@ async fn close_ladder_escalates_to_sigterm_when_peer_ignores_shutdown_and_eof() 
 async fn spawn_failures_map_to_typed_errors() {
     let timeouts = test_timeouts();
 
-    // Missing program: ENOENT -> RuntimeNotFound.
+    // Missing program: ENOENT -> Io. A spawn failure is an I/O error
+    // (spec §7); `Error::RuntimeNotFound` is reserved for "no runtime could
+    // be resolved" (spec §8), which `resolve_runtime` reports before spawn.
     let spec = LaunchSpec {
-        program: "/definitely/not/a/deepseek/runtime".into(),
+        program: PathBuf::from("/definitely/not/a/deepseek/runtime"),
         args: vec![],
         envs: Default::default(),
         cwd: None,
     };
     let err = HarnessClient::spawn(spec, timeouts).expect_err("missing program must fail");
-    assert!(
-        matches!(err, Error::RuntimeNotFound(_)),
-        "unexpected error: {err}"
-    );
+    assert!(matches!(err, Error::Io(_)), "unexpected error: {err}");
 
     // A program that exists but cannot be launched (a directory is not
     // executable) is a plain spawn I/O error, not a NotFound.
     let spec = LaunchSpec {
-        program: std::env::temp_dir().to_string_lossy().into_owned(),
+        program: std::env::temp_dir(),
         args: vec![],
         envs: Default::default(),
         cwd: None,
@@ -520,4 +637,129 @@ async fn malformed_and_blank_lines_are_skipped_not_fatal() {
     assert_eq!(message_id, "msg-after-garbage");
 
     rt.client.close().await.expect("clean close");
+}
+
+#[tokio::test]
+async fn start_creates_missing_configured_home_before_launch() {
+    // Spec §3.2.5: the resolved harness home is created when absent so a
+    // fresh home boots. The configured home is a unique temp dir that does
+    // not exist yet — the real ~/.dsh is never touched.
+    let config = harness_config(&[
+        expect_params(
+            "initialize",
+            json!({
+                "provider": "deepseek-official",
+                "model": "deepseek-v4-flash",
+            }),
+        ),
+        respond(server_info_result()),
+    ])
+    .expect("serialize script");
+    let home = config.dsh_home.clone().expect("temp home configured");
+    assert!(
+        !home.exists(),
+        "precondition: the temp home must not exist before start"
+    );
+    let mut harness = DeepSeekHarness::start(config)
+        .await
+        .expect("harness starts");
+    assert!(
+        home.is_dir(),
+        "the resolved home must be created before the child is launched"
+    );
+    assert_eq!(
+        harness.dsh_home(),
+        home.as_path(),
+        "the instance accessor must expose the resolved home the harness created and injected"
+    );
+    harness.close().await.expect("clean close");
+}
+
+#[tokio::test]
+async fn spawn_strips_forbidden_keys_from_inherited_parent_env() {
+    // Spec §4.2 / AC1: the child env carries no DSH_CORDIS_CONFIG /
+    // DSH_SESSION_ROOT / DSH_CWD under any configuration. The override set
+    // filters them from Config::env, and the spawn layer strips them from
+    // the inherited parent env — so even a parent that still exports the
+    // v0.1 keys cannot leak them into the runtime child.
+    let output = test_temp_root().join(format!("env-dump-{}.txt", Uuid::new_v4()));
+    // The three keys are never read by the crate, so mutating the process
+    // env here cannot affect sibling tests; the guard restores it on drop.
+    let _guard = ForbiddenEnvGuard;
+    std::env::set_var("DSH_CORDIS_CONFIG", "/parent/cordis.yml");
+    std::env::set_var("DSH_SESSION_ROOT", "/parent/sessions");
+    std::env::set_var("DSH_CWD", "/parent/cwd");
+    let spec = LaunchSpec {
+        program: PathBuf::from(env_dump_bin()),
+        args: vec![
+            OsString::from(&output),
+            OsString::from("DSH_CORDIS_CONFIG"),
+            OsString::from("DSH_SESSION_ROOT"),
+            OsString::from("DSH_CWD"),
+            OsString::from("PATH"),
+        ],
+        envs: Default::default(),
+        cwd: None,
+    };
+    let mut client = HarnessClient::spawn(spec, test_timeouts()).expect("spawn env-dump");
+    // The fixture writes the dump synchronously at startup; poll for it.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !output.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the env dump never appeared"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let dump = std::fs::read_to_string(&output).expect("read the env dump");
+    for forbidden in ["DSH_CORDIS_CONFIG", "DSH_SESSION_ROOT", "DSH_CWD"] {
+        assert!(
+            !dump
+                .lines()
+                .any(|line| line.starts_with(&format!("{forbidden}="))),
+            "{forbidden} must be stripped from the child env: {dump}"
+        );
+    }
+    assert!(
+        dump.lines().any(|line| line.starts_with("PATH=")),
+        "the ordinary parent env must still be inherited (no env_clear): {dump}"
+    );
+    client.close().await.expect("clean close");
+}
+
+#[tokio::test]
+async fn home_creation_failure_surfaces_as_io_before_spawn() {
+    // Spec §3.2.5: a create_dir_all failure surfaces as Error::Io before
+    // the child is spawned (no child leak). Point dsh_home at a path under
+    // a regular file so mkdir fails with NotADirectory — a kind only the
+    // home-creation step can produce (a spawn failure would be NotFound or
+    // PermissionDenied), pinning that the error precedes HarnessClient::spawn.
+    let blocker = test_temp_root().join(format!("home-blocker-{}", Uuid::new_v4()));
+    std::fs::write(&blocker, "").expect("create the blocker file");
+    let config = Config {
+        dsh_bin: Some(fake_runtime_path().to_string()),
+        dsh_home: Some(blocker.join("home")),
+        timeouts: test_timeouts(),
+        ..Config::default()
+    };
+    let err = DeepSeekHarness::start(config)
+        .await
+        .expect_err("home creation under a regular file must fail");
+    assert!(
+        matches!(&err, Error::Io(io) if io.kind() == std::io::ErrorKind::NotADirectory),
+        "expected Error::Io(NotADirectory) from create_dir_all before spawn, got: {err}"
+    );
+}
+
+/// Restores the parent env after the forbidden-key spawn test. The three
+/// keys are never read by the crate, so leaving them set would be benign,
+/// but the test restores them anyway to keep the process env pristine.
+struct ForbiddenEnvGuard;
+
+impl Drop for ForbiddenEnvGuard {
+    fn drop(&mut self) {
+        for key in ["DSH_CORDIS_CONFIG", "DSH_SESSION_ROOT", "DSH_CWD"] {
+            std::env::remove_var(key);
+        }
+    }
 }

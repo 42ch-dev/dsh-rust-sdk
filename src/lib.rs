@@ -14,55 +14,82 @@
 //! # Compatibility
 //!
 //! The **Python** SDK surface is the alignment baseline for types and errors
-//! that leak into the public API. The TypeScript SDK's `RunResult` lacks
-//! `finish_reason` and `session_root`; Rust intentionally follows Python, not
-//! TypeScript:
+//! that leak into the public API. [`RunResult`] mirrors Python's five fields
+//! exactly (`session_id`, `final_response`, `finish_reason`, `events`,
+//! `notifications`) — there is no `session_root`, which upstream removed and
+//! asserts its absence. The TypeScript SDK's `RunResult` lacks
+//! `finish_reason`. Rust intentionally follows Python, not TypeScript:
 //!
 //! | Field | Python | TypeScript | Rust (this crate) |
 //! |---|---|---|---|
 //! | `session_id` / `sessionId` | yes | yes | [`RunResult::session_id`] |
 //! | `final_response` / `finalResponse` | yes | yes | [`RunResult::final_response`] |
-//! | `finish_reason` | yes (Python extension) | no | [`RunResult::finish_reason`] |
+//! | `finish_reason` | yes | no | [`RunResult::finish_reason`] |
 //! | `events` (root session only) | yes | yes | [`RunResult::events`] |
 //! | `notifications` (root + descendants) | yes | yes | [`RunResult::notifications`] |
-//! | `session_root` | yes (Python extension) | no | [`RunResult::session_root`] |
+//! | `session_root` | no (removed) | no | does not exist |
 //!
-//! (The table is mirrored in the crate README, `## RunResult alignment`;
-//! keep the two copies in sync.)
+//! (The table is mirrored in the crate README, `### RunResult`; keep the two
+//! copies in sync.)
 //!
 //! # Environment injection
 //!
-//! [`DeepSeekHarness::start`] injects `DSH_CWD` always, and
-//! `DSH_SESSION_ROOT`, `DSH_CORDIS_CONFIG`, `DEEPSEEK_BASE_URL` /
-//! `DEEPSEEK_API_KEY` only when configured — each override wins over any
-//! inherited value (Python `dict.update` semantics), and the parent
-//! environment is otherwise inherited wholesale. With no effective
-//! `DSH_CORDIS_CONFIG` the SDK injects a bundled copy of the runtime's
-//! default `cordis.yml`.
-//!
-//! **Deliberate divergence from the Python SDK** (documented; do not "fix"
-//! to match Python): the Python SDK injects its bundled default only when
-//! the bundled runtime carrier is used. This crate is bring-your-own runtime
-//! (Plan A) — there is no bundled carrier — so the default is injected
-//! whenever no effective config exists, regardless of how the runtime binary
-//! was resolved.
+//! [`DeepSeekHarness::start`] boots the runtime under the configured
+//! `profile` (`dsh --profile <name> [--patch <path>]...`) and injects the
+//! resolved `DSH_HOME`, the caller's `Config::env` entries, and
+//! `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` when configured; the parent
+//! environment is otherwise inherited wholesale. The caller's `DSH_HOME`
+//! is an input to resolution, not a post-resolution override: it is
+//! excluded from the verbatim passthrough, so the child always receives
+//! the resolved absolute, `~`-expanded home. The crate never writes
+//! `DSH_CORDIS_CONFIG`, `DSH_SESSION_ROOT`, or `DSH_CWD` — none has a
+//! reader upstream — and filters them out of `Config::env` as well.
 //!
 //! The runtime binary is bring-your-own (Plan A): [`DeepSeekHarness::start`]
-//! resolves it from `Config::runtime_bin` / `launch_args_override` or the
-//! `DSH_RUNTIME_BIN` environment variable. This crate never downloads or
-//! bundles a runtime — see
+//! resolves it from `Config::dsh_bin` or the `DSH_RUNTIME_BIN` environment
+//! variable. This crate never downloads or bundles a runtime — see
 //! <https://github.com/deepseek-ai/deepseek-harness> for the official runtime
 //! and its sources.
+//!
+//! # Platform support
+//!
+//! The crate itself is pure Rust and platform-light; the consumed runtime
+//! decides the platform matrix. Upstream publishes the runtime for **5
+//! targets**: Linux x64, Linux arm64, macOS arm64, macOS x64, and Windows
+//! x64.
+//!
+//! # Deliberate divergences
+//!
+//! The divergences below are deliberate and documented (wire spec §7); a
+//! contributor must not "fix" one back to reference behaviour without a
+//! superseding spec decision:
+//!
+//! - **`DSH_HOME` fallback** — the crate resolves `~/.dsh` where Python
+//!   raises `ValueError`.
+//! - **No client-directed request API** — Python exposes `next_request` /
+//!   `respond` / `notify`; the crate exposes none (the runtime emits no
+//!   client-directed requests; they are auto-answered `-32601`). Non-goal,
+//!   not a gap.
+//! - **Stricter malformed-notification policy** — a `session.event` /
+//!   `session.status` whose payload fails its shape check fails the run
+//!   with `Error::SdkProtocol`; Python silently skips a malformed
+//!   event/status. This converts a silent hang into a typed failure and is
+//!   **not** Python parity.
+//! - **Strict `serverInfo.name` equality** — `initialize` requires the
+//!   identity to be exactly `deepseek-harness-sdk-runtime`; an upstream
+//!   rename fails loudly instead of being silently accepted.
+//! - **No `run()` convenience, no lazy start** — the crate requires an
+//!   explicit [`DeepSeekHarness::start`]; Python and the TypeScript SDK can
+//!   start lazily on first use. Non-goal, not a gap.
 //!
 //! # Non-goals
 //!
 //! - **No cancellation**: there is no session-close / cancel RPC.
 //!   [`Session::run`] waits for root `idle`; closing the harness mid-turn
 //!   abandons the turn.
-//! - **No Windows support** (consumed platforms: linux-x64, linux-arm64,
-//!   macos-arm64).
-//! - (The README lists the remaining non-goals: no runtime delivery /
-//!   bundling, no crates.io publish, no TypeScript-parity helper.)
+//! - (The README's Known limitations list the remaining non-goals: no
+//!   runtime binary delivery / bundling / download, no version
+//!   negotiation.)
 
 pub mod api;
 pub mod client;
@@ -75,10 +102,11 @@ pub use api::{extract_finish_reason, DeepSeekHarness, Input, RunResult, Session}
 pub use client::{ClientTimeouts, HarnessClient, LaunchSpec, NotificationSubscription};
 pub use error::Error;
 pub use protocol::{
-    ContentBlock, ImageAttachmentRef, IncomingFrame, IncomingRequest, InitializeParams,
-    InitializeResult, JsonRpcErrorBody, JsonRpcId, JsonRpcResponse, JsonRpcResponseOutcome,
-    Notification, ServerInfo, SessionEventNotification, SessionPromptParams, SessionPromptResult,
-    SessionStatusNotification, SubagentFinishedNotification, SubagentStartedNotification,
+    ContentBlock, Dimensions, FileAttachmentRef, ImageAttachmentRef, IncomingFrame,
+    IncomingRequest, InitializeParams, InitializeResult, JsonRpcErrorBody, JsonRpcId,
+    JsonRpcResponse, JsonRpcResponseOutcome, Notification, ServerInfo, SessionEventNotification,
+    SessionPromptParams, SessionPromptResult, SessionStatusNotification,
+    SubagentFinishedNotification, SubagentStartedNotification,
 };
 pub use runtime::Config;
 pub use transport::JsonRpcLineTransport;

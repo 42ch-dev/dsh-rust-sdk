@@ -4,8 +4,8 @@ problem_type: best_practice
 category: best-practices
 module: release-pipeline
 date: 2026-08-17
+last_updated: 2026-09-08
 severity: high
-plan_id: 03-release-pipeline
 tags:
   - github-actions
   - crates-io
@@ -17,7 +17,6 @@ applies_when:
   - adding or altering release workflows for Rust crates in this org
   - publishing a companion crate or stabilizing 0.1.0 through the pipeline
   - extending the .changes fragment changelog scheme
-source_iteration: v0.2
 status: stable
 ---
 
@@ -25,7 +24,7 @@ status: stable
 
 ## Context
 
-v0.2 shipped a two-step, PR-driven release pipeline for `deepseek-harness-sdk` (`.github/workflows/release-prep.yml` + `release.yml`, `xtask` changelog tooling, `docs/release.md` SOP). The architecture follows 42ch/spoke (`release.yml` + `new-release.yml`); changelog rules follow omdsh-dev/dsh-llm-fallbacks (`.changes/` fragments). Both references were read in full during Phase 1 and several traps were found only by source-verification or live review — recorded here so the next pipeline (or the next iteration touching this one) does not rediscover them.
+v0.2 shipped a two-step, PR-driven release pipeline for `deepseek-harness-sdk` (`.github/workflows/release-prep.yml` + `release.yml`, `xtask` changelog tooling, `docs/release.md` SOP). The architecture follows 42ch/spoke (`release.yml` + `new-release.yml`); changelog rules follow omdsh-dev/dsh-llm-fallbacks (`.changes/` fragments). Both references were read in full and several traps were found only by source-verification or live review — recorded here so future work touching this pipeline does not rediscover them.
 
 ## Guidance
 
@@ -38,7 +37,7 @@ v0.2 shipped a two-step, PR-driven release pipeline for `deepseek-harness-sdk` (
 
 **PR-driven tags (spoke pattern):**
 - `pull_request: closed` on main + exact `release` label → tag job creates the **annotated** tag from `Cargo.toml` version at the merge commit; the tag push re-enters via `push: tags: v*` for verify + release + publish.
-- Label guards must use **exact array membership**: `contains(github.event.pull_request.labels.*.name, 'release')`. The common `contains(join(...labels.*.name, ','), 'release')` is a substring match — `pre-release` passes it (found in QC).
+- Label guards must use **exact array membership**: `contains(github.event.pull_request.labels.*.name, 'release')`. The common `contains(join(...labels.*.name, ','), 'release')` is a substring match — `pre-release` passes it.
 - Guard the tag job also on head-ref prefix `release/v` + PR-title ↔ `Cargo.toml` version cross-check (fallbacks pattern) so a hand-titled PR cannot tag.
 - Annotated-only policy: `git cat-file -t` must be `tag`; existing annotated → continue (idempotent), lightweight → hard error.
 - A tag push can only trigger workflows **present in the pushed tree** — backfilled tags on pre-pipeline commits cannot trigger anything (verified with `git ls-tree`).
@@ -53,11 +52,17 @@ v0.2 shipped a two-step, PR-driven release pipeline for `deepseek-harness-sdk` (
 - Auto-bump must stay on the prerelease line: `X.Y.Z-pre.N → X.Y.Z-pre.(N+1)` (numeric tail only; non-numeric tail → demand explicit version). Reject build metadata on explicit input (crates.io won't publish `+build` versions).
 - Committed CHANGELOG sections should be byte-reproducible from the archived fragments — keep a regression test asserting it.
 
+**Fragment authoring lessons (2026-09-08):**
+- **One file per change group with a single `category:` frontmatter.** A change spanning several categories (e.g. `Removed` + `Changed` + `Added`) is split into per-category files, not one file with `###` sections. The assembler renders body lines verbatim under the generated `### <category>` heading, so an in-body `###` heading survives as literal text — the wrong changelog.
+- **Body lines render verbatim; author them as `- ` bullets.** The assembler never re-parses the body, so anything else in the body (headings, prose blocks, process notes) lands in CHANGELOG.md verbatim.
+- **An unreleased fragment can become factually false before assembly.** A later change can remove the thing an earlier fragment describes. The launch-contract realignment made `runtime-acquisition-routes.md` ("the interactive `dsh` CLI is not the SDK runtime") and `runtime-wheel-rg-sidecar.md` (a cordis-config reference) false; both were corrected minimally before assembly. Re-check unreleased fragments whenever a change lands that touches their claims — they have not shipped and must not enter the changelog as false statements.
+- **A fragment is consumer-facing.** It is changelog prose for users, not a process log: test counts, review rounds, and internal git ranges do not belong (enforced by review, not by the assembler).
+
 **Workflow/tooling details that bit us:** machine-global `tag.gpgSign=true` breaks git fixtures in tests (use `-c tag.gpgSign=false`); `cargo xtask` alias needs a committed `.cargo/config.toml`; a root-package workspace needs `default-members = [".", "xtask"]` for plain `cargo test` to cover xtask; `cargo publish -p <name>` only (never bare `--workspace`); keep xtask out of the crate `include` allowlist; rust-cache `shared-key` must match ci.yml for the verify jobs to reuse PR cache.
 
 ## Why This Matters
 
-The next iteration (`runtime-bin-delivery` companion crate, or `0.1.0` stabilization) will publish through this pipeline; anyone adding a second crate or a release-lint job reuses these contracts. The traps above are invisible until a first live run — the expensive kind of discovery.
+A future release (the `runtime-bin-delivery` companion crate, or a `0.1.0` stabilization) will publish through this pipeline; anyone adding a second crate or a release-lint job reuses these contracts. The traps above are invisible until a first live run — the expensive kind of discovery.
 
 ## When to Apply
 

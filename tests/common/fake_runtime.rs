@@ -7,7 +7,9 @@
 //! requests, so the same harness serves any client-level scenario.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use deepseek_harness_sdk::{ClientTimeouts, Config, Error, HarnessClient, LaunchSpec};
@@ -23,6 +25,7 @@ use serde_json::json;
 /// request-timeout scenario needs only a short `request_timeout` override.
 pub fn test_timeouts() -> ClientTimeouts {
     ClientTimeouts {
+        initialize_timeout: None,
         request_timeout: None,
         shutdown_timeout: Duration::from_millis(200),
         eof_grace: Duration::from_millis(300),
@@ -32,7 +35,7 @@ pub fn test_timeouts() -> ClientTimeouts {
 
 /// Absolute path to the `fake-runtime` fixture binary. Cargo sets
 /// `CARGO_BIN_EXE_<name>` for integration tests at compile time.
-pub fn fake_runtime_bin() -> &'static str {
+pub fn fake_runtime_path() -> &'static str {
     env!("CARGO_BIN_EXE_fake-runtime")
 }
 
@@ -41,19 +44,36 @@ pub fn sleep_forever_bin() -> &'static str {
     env!("CARGO_BIN_EXE_sleep-forever")
 }
 
+/// Absolute path to the `env-dump` fixture binary.
+pub fn env_dump_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_env-dump")
+}
+
+/// One per-process temp root for the whole integration suite, so test
+/// artifacts (scenario files, harness homes, env dumps) accumulate in a
+/// single directory instead of one unique directory per allocation. A
+/// stale root from a previous run is removed best-effort on first use, so
+/// the system temp dir never holds more than one run's artifacts (F6).
+pub fn test_temp_root() -> &'static Path {
+    static ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
+        let root = std::env::temp_dir().join(format!("dsh-sdk-tests-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create the test temp root");
+        root
+    });
+    &ROOT
+}
+
 /// A [`LaunchSpec`] running the fake-runtime peer against `script`.
 ///
 /// The scenario is written to a unique temp file and passed via
-/// `--script-file` (never inline argv — a large scenario exceeds the Linux
+/// `--patch <path>` (never inline argv — a large scenario exceeds the Linux
 /// single-argument limit; see [`write_script_file`]).
 pub fn fake_runtime_spec(script: &[Directive]) -> Result<LaunchSpec, serde_json::Error> {
     let script_path = write_script_file(script)?;
     Ok(LaunchSpec {
-        program: fake_runtime_bin().to_string(),
-        args: vec![
-            "--script-file".to_string(),
-            script_path.to_string_lossy().into_owned(),
-        ],
+        program: PathBuf::from(fake_runtime_path()),
+        args: vec![OsString::from("--patch"), script_path.into_os_string()],
         envs: HashMap::new(),
         cwd: None,
     })
@@ -70,7 +90,7 @@ pub fn fake_runtime_spec(script: &[Directive]) -> Result<LaunchSpec, serde_json:
 /// uniformly.
 fn write_script_file(script: &[Directive]) -> Result<PathBuf, serde_json::Error> {
     let script = serde_json::to_string(script)?;
-    let path = std::env::temp_dir().join(format!("dsh-fake-runtime-{}.json", Uuid::new_v4()));
+    let path = test_temp_root().join(format!("dsh-fake-runtime-{}.json", Uuid::new_v4()));
     std::fs::write(&path, script).map_err(serde_json::Error::io)?;
     Ok(path)
 }
@@ -89,28 +109,28 @@ impl FakeRuntime {
     }
 }
 
-/// The session root injected into every high-level harness in this suite, so
-/// `RunResult::session_root` is observable without touching the disk.
-pub fn test_session_root() -> PathBuf {
-    PathBuf::from("/tmp/dsh-sdk-test-session-root")
+/// A unique temp directory for the harness home, so the fake-runtime suite
+/// never touches a real `~/.dsh`: `DeepSeekHarness::start` creates the
+/// resolved home at boot (spec §3.2.5). Lives under the per-run temp root
+/// (F6).
+fn temp_home_dir() -> PathBuf {
+    test_temp_root().join(format!("dsh-sdk-test-home-{}", Uuid::new_v4()))
 }
 
 /// A [`Config`] for `DeepSeekHarness::start` that launches the fake-runtime
 /// peer against `script`: Python-parity defaults, the suite's fast
-/// close-ladder timeouts, and the suite's session root.
+/// close-ladder timeouts, and a temp harness home.
 ///
-/// Like [`fake_runtime_spec`], the scenario is passed via `--script-file`
-/// (temp file), never inline argv.
+/// The fake runtime is launched through the real launch model — `dsh_bin`
+/// names the fixture and the scenario path rides as a `--patch` (temp file,
+/// never inline argv; see [`write_script_file`]).
 pub fn harness_config(script: &[Directive]) -> Result<Config, serde_json::Error> {
     let script_path = write_script_file(script)?;
     Ok(Config {
-        launch_args_override: Some(vec![
-            fake_runtime_bin().to_string(),
-            "--script-file".to_string(),
-            script_path.to_string_lossy().into_owned(),
-        ]),
+        dsh_bin: Some(fake_runtime_path().to_string()),
+        patches: vec![script_path],
         timeouts: test_timeouts(),
-        session_root: Some(test_session_root().to_string_lossy().into_owned()),
+        dsh_home: Some(temp_home_dir()),
         ..Config::default()
     })
 }

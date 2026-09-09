@@ -15,8 +15,8 @@
 //! The implementation is split into focused submodules (`core` for the
 //! spawn/request surface, `read_loop`, `subscription`, `session_tree`,
 //! `close_ladder`) that share the state types and diagnostics helpers below;
-//! the public surface is re-exported unchanged, so the crate-level API is
-//! identical to a single-module layout.
+//! the public surface is re-exported from the submodules, so the crate-level
+//! API is identical to a single-module layout.
 
 mod close_ladder;
 mod core;
@@ -26,6 +26,7 @@ mod subscription;
 
 // The public surface, re-exported so `client::*` paths (and the crate-level
 // re-exports in `lib.rs`) are unchanged by the split.
+pub(crate) use self::core::FORBIDDEN_ENV_KEYS;
 pub use self::core::{ClientTimeouts, HarnessClient, LaunchSpec};
 pub use self::subscription::NotificationSubscription;
 

@@ -1,35 +1,160 @@
-//! Real-runtime smoke test, gated on `DSH_RUNTIME_BIN` + `DEEPSEEK_API_KEY`.
-//!
-//! This test exercises the full Python-parity stack — `DeepSeekHarness::start`
-//! → `Session::run` — against a **real** DeepSeek Harness runtime binary
+//! Real-runtime tests against a **real** DeepSeek Harness runtime binary
 //! (bring-your-own; see <https://github.com/deepseek-ai/deepseek-harness>).
 //!
-//! It is skipped (with an explicit notice) when either environment variable is
+//! Two tiers:
+//!
+//! 1. `real_runtime_handshake` — **keyless**: resolves a `dsh` binary from
+//!    `DSH_RUNTIME_BIN` or `dsh` on `PATH`, boots it with a temp `dsh_home`,
+//!    and proves `start()` completes the `initialize` handshake and `close()`
+//!    reaps the child. No API key, no `Session::run`. This proves boot +
+//!    `initialize` + `close` only (launch spec §9 item 4) — it is **not**
+//!    end-to-end proof of a live turn.
+//! 2. `real_runtime_smoke` — one live LLM turn, gated on `DEEPSEEK_API_KEY`
+//!    (and a resolvable runtime). Structural assertions only.
+//!
+//! Both tiers skip (with an explicit notice) when their prerequisites are
 //! absent, so `cargo test` stays green on machines without a runtime binary
 //! and without credentials. Gating uses `std::env::var` at test start, never
 //! the compile-time `env!` macro — `env!` would break builds where the
 //! variables are unset.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use deepseek_harness_sdk::{Config, DeepSeekHarness, Input};
 
-/// One smoke turn: start a harness with a temp `session_root` and default
+mod common;
+
+/// Best-effort probe of the resolved runtime's own version (`dsh --version`),
+/// so the notice reports the version the test actually ran against instead of
+/// a hard-coded literal. Bounded to 5 s so a wedged `dsh --version` cannot
+/// hang the test or the CI job (qc3 F-003); the child is reaped on expiry.
+/// Returns `None` when the probe fails (timeout, spawn error, non-zero exit,
+/// empty or non-UTF-8 output) — the notice then degrades to "version unknown"
+/// and the test itself is never blocked by the probe.
+async fn probe_dsh_version(runtime_bin: &str) -> Option<String> {
+    let mut child = tokio::process::Command::new(runtime_bin)
+        .arg("--version")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let status = match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        Ok(result) => result.ok()?,
+        Err(_) => {
+            // Bound exceeded: reap the child so nothing keeps running.
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return None;
+        }
+    };
+    if !status.success() {
+        return None;
+    }
+
+    // The child has exited, so reading the pipe reaches EOF and cannot hang.
+    use tokio::io::AsyncReadExt;
+    let mut stdout = child.stdout.take()?;
+    let mut out = String::new();
+    stdout.read_to_string(&mut out).await.ok()?;
+    let version = out.trim().to_owned();
+    (!version.is_empty()).then_some(version)
+}
+
+/// Resolve the runtime binary: `DSH_RUNTIME_BIN` (non-empty and existing)
+/// first, then `dsh` on `PATH`. Returns `None` when neither exists, so the
+/// caller can skip cleanly instead of failing.
+fn resolve_runtime_bin() -> Option<String> {
+    if let Some(bin) = std::env::var("DSH_RUNTIME_BIN")
+        .ok()
+        .filter(|bin| !bin.trim().is_empty())
+    {
+        // Same existence gate as the PATH branch below: a stale env var
+        // pointing at a deleted binary skips cleanly instead of hard-failing
+        // at spawn (qc3 F-002).
+        let candidate = PathBuf::from(&bin);
+        return candidate.is_file().then_some(bin);
+    }
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        for name in ["dsh", "dsh.exe"] {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
+}
+
+/// A unique temp harness home so repeated runs never reuse stale session
+/// state (process id + monotonic nanos; no extra dependency needed), under
+/// the per-run test temp root so the suite's artifacts stay consolidated
+/// and bounded (F6). `DeepSeekHarness::start` creates the home at boot
+/// (launch spec §3.2.5).
+fn temp_dsh_home() -> PathBuf {
+    common::fake_runtime::test_temp_root().join(format!(
+        "dsh-sdk-real-runtime-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos()
+    ))
+}
+
+/// Keyless boot tier: resolve a `dsh` binary, start a harness with a temp
+/// `dsh_home`, and assert the `initialize` handshake succeeded, then close.
+///
+/// No API key and no `Session::run` — this proves boot + `initialize` +
+/// `close` only (launch spec §9 item 4), not end-to-end function.
+#[tokio::test]
+async fn real_runtime_handshake() {
+    let Some(runtime_bin) = resolve_runtime_bin() else {
+        eprintln!(
+            "skipping real-runtime handshake: no dsh binary found; set DSH_RUNTIME_BIN \
+             or put dsh on PATH (https://github.com/deepseek-ai/deepseek-harness) to run \
+             this test (validated locally against a real dsh runtime)"
+        );
+        return;
+    };
+
+    let dsh_home = temp_dsh_home();
+    let mut harness = DeepSeekHarness::start(Config {
+        dsh_bin: Some(runtime_bin.clone()),
+        dsh_home: Some(dsh_home.clone()),
+        ..Config::default()
+    })
+    .await
+    .expect("harness starts against the real runtime: initialize handshake succeeded");
+
+    harness.close().await.expect("clean close");
+
+    println!(
+        "real-runtime handshake ok: dsh={runtime_bin} dsh_home={} (dsh {})",
+        dsh_home.display(),
+        probe_dsh_version(&runtime_bin)
+            .await
+            .unwrap_or_else(|| "version unknown".into())
+    );
+}
+
+/// One smoke turn: start a harness with a temp `dsh_home` and default
 /// config, run `Session::run`, and assert **structural** facts only (LLM
 /// output is nondeterministic): a success-class `finish_reason`
-/// (`completed`/`max-tokens`), a non-empty `final_response`, the session ids
-/// present, and the configured `session_root` surfaced.
+/// (`completed`/`max-tokens`), a non-empty `final_response`, and the
+/// session id present.
+///
+/// Gated on `DEEPSEEK_API_KEY` (and a resolvable runtime, shared with the
+/// keyless tier); skipped with an explicit notice when either is absent.
 #[tokio::test]
 async fn real_runtime_smoke() {
-    // Runtime gating — read at runtime, not at compile time.
-    let runtime_bin = std::env::var("DSH_RUNTIME_BIN")
-        .ok()
-        .filter(|bin| !bin.trim().is_empty());
-    let Some(runtime_bin) = runtime_bin else {
+    let Some(runtime_bin) = resolve_runtime_bin() else {
         eprintln!(
-            "skipping real-runtime smoke: DSH_RUNTIME_BIN is unset or empty; \
-             set it to a DeepSeek Harness runtime binary \
-             (https://github.com/deepseek-ai/deepseek-harness) to run this test"
+            "skipping real-runtime smoke: no dsh binary found; set DSH_RUNTIME_BIN \
+             or put dsh on PATH (https://github.com/deepseek-ai/deepseek-harness) to run \
+             this test (validated locally against a real dsh runtime)"
         );
         return;
     };
@@ -45,22 +170,11 @@ async fn real_runtime_smoke() {
         return;
     };
 
-    // A unique temp session root so repeated runs never reuse stale session
-    // state (process id + monotonic nanos; no extra dependency needed).
-    let session_root = std::env::temp_dir().join(format!(
-        "dsh-sdk-real-runtime-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock before unix epoch")
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&session_root).expect("create temp session root");
-
+    let dsh_home = temp_dsh_home();
     let mut harness = DeepSeekHarness::start(Config {
-        runtime_bin: Some(runtime_bin),
+        dsh_bin: Some(runtime_bin),
         api_key: Some(api_key),
-        session_root: Some(session_root.to_string_lossy().into_owned()),
+        dsh_home: Some(dsh_home.clone()),
         // Bound the wire requests so a wedged runtime fails fast instead of
         // hanging the suite; the activity interval itself is unbounded
         // (Python parity) and is bounded below by the outer timeout.
@@ -74,7 +188,7 @@ async fn real_runtime_smoke() {
         Duration::from_secs(600),
         harness
             .start_session(None)
-            .run(Input::Text("Reply with exactly: ok".into())),
+            .run(Input::Text("Reply with exactly: ok".into()), None),
     )
     .await
     .expect("real-runtime turn completes within the smoke timeout")
@@ -99,11 +213,6 @@ async fn real_runtime_smoke() {
         "expected a non-empty final_response"
     );
     assert!(!result.session_id.is_empty(), "session id present");
-    assert_eq!(
-        result.session_root.as_deref(),
-        Some(session_root.as_path()),
-        "configured session_root is surfaced on the RunResult"
-    );
 
     let response = &result.final_response;
     let preview: String = response.chars().take(200).collect();

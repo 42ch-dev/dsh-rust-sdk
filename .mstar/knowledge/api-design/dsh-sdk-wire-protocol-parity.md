@@ -1,10 +1,10 @@
 ---
 module: deepseek-harness-sdk
 date: 2026-08-16
+last_updated: 2026-09-08
 problem_type: api_design
 category: api-design
 severity: high
-plan_id: 02-highlevel-api-runtime
 tags:
   - dsh
   - wire-protocol
@@ -13,7 +13,7 @@ tags:
   - sdk-client
 applies_when:
   - Maintaining or extending the deepseek-harness-sdk client (protocol, client, api layers)
-  - Building the runtime-bin companion crate (next iteration)
+  - Building the runtime-bin companion crate (future)
   - Debugging Session::run activity-interval behavior against the DSH runtime
 related_components:
   - src/protocol.rs
@@ -24,21 +24,29 @@ related_components:
 
 # DSH SDK wire protocol: source-verified facts and Python-parity decisions
 
+> **Status (2026-09-08): contract facts superseded.** The launch/env/config
+> half and the wire-surface facts this document used to carry are now the
+> frozen contract of `.mstar/specs/dsh-runtime-launch-contract.md` and
+> `.mstar/specs/dsh-sdk-wire-parity-surface.md` (both grounded at upstream
+> ref `c389f96bf3`). This document keeps only what the specs do not restate:
+> the source-verification method and the three corrected traps below.
+
 ## Context
 
-v0.1 built a Rust client for the DeepSeek Harness (DSH) SDK runtime: stdio line-framed JSON-RPC 2.0, spawned as a subprocess. The Python SDK (`python/sdk` in DSH) is the alignment baseline; the TypeScript SDK (`packages/sdk/client`) is the design twin. An advisor feasibility study plus an architect pass that read the DSH sources end-to-end produced a set of verified facts — three of which **contradicted the original plan text** and would each have shipped a broken client. This document is the cross-iteration SSOT for those facts so future iterations (runtime-bin delivery, protocol upgrades) never re-derive them from memory.
+v0.1 built a Rust client for the DeepSeek Harness (DSH) SDK runtime: stdio line-framed JSON-RPC 2.0, spawned as a subprocess. The Python SDK (`python/sdk` in DSH) is the alignment baseline; the TypeScript SDK (`packages/sdk/client`) is the design twin. An advisor feasibility study plus an architect pass that read the DSH sources end-to-end produced a set of verified facts — three of which **contradicted the original plan text** and would each have shipped a broken client. The three traps, and the source-verification method that surfaced them, remain this document's value; every other fact moved to the two specs above.
 
 Upstream: https://github.com/deepseek-ai/deepseek-harness (the only permitted citation in externally visible docs).
 
 ## Guidance
 
-### Wire facts (verified against DSH source, pinned behavior)
+### Source-verification method
 
-- **Requests C→S**: `initialize` `{cwd, provider, model, maxTokens?}` → `{serverInfo {name, version}}`; `session/prompt` `{sessionId, contentBlocks}` → `{messageId}`; `shutdown` no params → `{}`.
-- **Notifications S→C**: `session.event {sessionId, event}`; `session.status {sessionId, status: "running"|"idle"}`; `subagent.started {parentSessionId, childSessionId}`; `subagent.finished {provider, agentId, parentSessionId, childSessionId, status: "ok"|"error", stopReason, lastAssistantMessage?}`.
-- `serverInfo.name` wire value is exactly `deepseek-harness-sdk-runtime`; version `0.0.1` hard-coded, **no version negotiation**.
-- Outgoing request ids: string uuid-v4. Incoming ids: String | Number.
-- `ContentBlock` is merge-extensible: 5 known variants (`text`, `reasoning`, `image`, `tool-call`, `tool-result`); `tool-call.arguments` is a **raw JSON string**; `tool-result.content` is recursive `ContentBlock[]`. Unknown `type` must pass through (`Unknown(Value)`).
+Contract facts are verified **against the upstream runtime source at a pinned ref**, not against the SDK wrappers or a prior audit's conclusions:
+
+- Pin an upstream commit and cite `path:line` for every contract statement — the two specs cite `c389f96bf3` throughout. A moved line is not a contract change; a changed rule is. Re-run the specs' re-verification greps when upstream advances (launch spec §10, wire spec §10).
+- Treat both official SDKs as **clients**, not as the authority: a wrapper can carry its own divergence from the runtime (Python raises `ValueError` on a missing `DSH_HOME`; the runtime itself falls back to `~/.dsh` — launch spec §3.3).
+- Re-verify in passes that classify each fact as **still true** vs **no longer true** and record what changed. The 2026-09-08 re-verification at `c389f96bf3` found the wire surface unchanged but the launch/env/config contract replaced (the runtime became `dsh --profile <name>` with a resolved `DSH_HOME`, and the old `DSH_CORDIS_CONFIG` / `DSH_SESSION_ROOT` / `DSH_CWD` knobs lost their readers) — which is why the contract half now lives in the specs.
+- Keep the reusable facts in durable docs; the audit reports behind them (`.mstar/projects/_default/references/rust-sdk-analysis/`) are evidence, not the source of truth.
 
 ### The three traps (each corrected a wrong plan line)
 
@@ -46,63 +54,24 @@ Upstream: https://github.com/deepseek-ai/deepseek-harness (the only permitted ci
 2. **Malformed peer lines are SKIPPED, not rejected.** Both reference clients ignore non-JSON/invalid-UTF-8 lines and keep reading. Only a local framing guard (oversize line, 16 MiB) errors. Rejecting malformed lines breaks parity with chatty prelude runtimes.
 3. **stderr is captured (400-line tail), not inherited.** Python `deque(maxlen=400)`, TS `STDERR_TAIL_LIMIT=400`; the tail is embedded in `TransportClosed`/timeout/close-ladder diagnostics together with the exit code.
 
-### Python-parity decisions (deliberate, documented divergences included)
+### Contract facts now live in the two frozen specs
 
-- `RunResult` follows **Python**, not TS: 6 fields incl. `finish_reason` + `session_root` (TS has neither). Rustdoc `# Compatibility` states this explicitly.
-- `finish_reason` = last root `turn/end`'s `data.reason.kind` **within the `Session::run` activity interval** (subscribe-before-prompt → root idle inclusive); no `turn/end` → `None`; malformed last `turn/end` → `Error::SdkProtocol` with exact message `"turn/end event requires a string data.reason.kind"`. Malformedness is checked only on the **last** `turn/end` (reversed scan stops there).
-- `final_response` = last `assistant/message` event, pointer walk `data.message.content` else `data.content`, `text: null` → `""`, **no fallback to earlier events**.
-- Close ladder with TS defaults (Python collapses all to 1s): `shutdown` 1s → stdin EOF grace 6s → SIGTERM grace 3s → SIGKILL. Teardown must be unconditional (a ladder error must not leave pending/tasks/notifications alive, and a retry `close()` must be safe).
-- **Env injection**: `DSH_CWD` always; `DSH_SESSION_ROOT` / `DSH_CORDIS_CONFIG` / `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` iff configured; override-set wins over inherited env; **empty-string `DSH_CORDIS_CONFIG` counts as absent** (Python truthiness) → bundled default `cordis.yml` injected. Python injects the default only for its bundled carrier; Rust under 方案 A (bring-your-own runtime) injects **always-when-absent** because the runtime refuses to boot without an explicit config — a deliberate divergence, do not "fix" it back to Python behavior.
-- `serverInfo.name` **strict equality** is intentionally stricter than both references (Python: fields Optional; TS: presence-only). An upstream rename would be rejected on purpose.
-- Broadcast buffer is bounded (4096 default, `Lagged(n)` drop-oldest at the low level) — Python's queue is unbounded. `Session::run` fails fast with a typed `SdkProtocol` error when lag is observed mid-run (a dropped receipt or root-idle would otherwise hang or silently truncate); malformed inspected payloads likewise fail fast rather than warn-and-continue.
-- No protocol-level cancellation exists: abandoning a turn means closing the runtime. Documented in README; do not invent a cancel method.
+Do not restate or re-derive these here; read them from the specs:
 
-### Re-verified 2026-09-08 against upstream `c389f96bf3` (wire still true, launch contract NOT)
-
-A read-only three-track audit re-checked every fact above against the current
-upstream runtime and both official SDKs:
-
-- **Still true (no change needed)**: the three request methods, the four
-  notification names and payload shapes, `serverInfo` name/version, framing,
-  malformed-line skipping, the `inserted[].id` receipt, and the 400-line stderr
-  tail. **The three traps above remain correct.** `ContentBlockMap` gained a
-  sixth variant (`file`) — `Unknown` passthrough already preserves it, so only
-  typed access is missing.
-- **No longer true — launch/env contract**: the upstream runtime is now the
-  `dsh` CLI under a required `--profile` (`sdk` / `sdk-minimal`) with an explicit
-  `DSH_HOME`. `DSH_CORDIS_CONFIG`, `DSH_SESSION_ROOT`, and `DSH_CWD` have **no
-  reader upstream**; the bundled default `cordis.yml` was deleted and the
-  package it mounts no longer exists. The "bundled default config injection"
-  bullet above therefore describes a dead mechanism, not a live divergence.
-  The tracked re-alignment work is the launch-contract goal in the local
-  project roadmap (see the roadmap SSOT note in the repo `AGENTS.md`).
-- **Parity baseline moved**: upstream Python `RunResult` dropped `session_root`
-  (5 fields now) and its config dropped `session_root` / `cordis` /
-  `runtime_bin` / `launch_args_override`; it gained `reasoning_effort`,
-  `profile`, `patches`, `dsh_home`, and a 30 s `initialize` timeout. The
-  `initialize` params also accept an optional `reasoningEffort`.
-- **Session format v2**: the former per-token assistant-chunk event is gone;
-  the assistant-message event now carries an embedded stream payload and the new
-  assistant-attempt event exists. Client impact is limited — events are
-  opaque `Value` here and the derivations read unchanged paths.
-
-Evidence: three read-only audit reports (upstream change inventory, wire/API
-parity diff, runtime-compatibility and coverage gaps) plus a PM consolidated
-verdict, all held as local process artifacts; the reusable facts are captured
-in this document so they survive without those files.
+- **Wire surface** — request methods, notification names and payloads, request-id rules, `serverInfo` contract, the six-variant content-block vocabulary, `reasoningEffort` omit-when-unset, the bounded `initialize`, the per-notification callback, and the documented divergences (strict `serverInfo.name` equality, malformed-notification strictness, bounded broadcast buffer, stderr-tail cap): `.mstar/specs/dsh-sdk-wire-parity-surface.md` §2–§7.
+- **Launch/env/config half** — launch grammar (`dsh --profile <name>` + ordered `--patch` overlays), `DSH_HOME` precedence and the `~/.dsh` divergence from Python, the child-env key set including the three forbidden keys (`DSH_CORDIS_CONFIG`, `DSH_SESSION_ROOT`, `DSH_CWD`), the removal list with a replacement per item, the `Config` / `RunResult` field sets, the close ladder, and error semantics: `.mstar/specs/dsh-runtime-launch-contract.md` §2–§7.
 
 ## Why This Matters
 
-Every one of the three traps produces a client that **compiles, passes surface-level tests, and hangs or misdiagnoses in production** (receipt never matches; prelude chatter kills the transport; death diagnostics lose stderr/exit evidence). The parity decisions above are locked product behavior backed by compass AC; silently reverting any of them is a spec violation even when it "matches Python better".
+Every one of the three traps produces a client that **compiles, passes surface-level tests, and hangs or misdiagnoses in production** (receipt never matches; prelude chatter kills the transport; death diagnostics lose stderr/exit evidence). The parity decisions are locked product behavior backed by the frozen specs; silently reverting any of them is a spec violation even when it "matches Python better".
 
 ## When to Apply
 
-- New protocol methods or notification types: extend `src/protocol.rs` with Unknown-tolerant parsing; never `deny_unknown_fields`.
-- Runtime-bin companion crate (durable item `runtime-bin-delivery`, tracked in the local project roadmap): platform matrix is linux-x64 / linux-arm64 / macos-arm64 (CI publishes exactly these three; macOS needs the sibling `-spawn-helper`).
-- Protocol bumps (`serverInfo.version` leaving 0.0.1): revisit the strict-name check and the no-negotiation stance together.
+- New protocol methods or notification types: extend `src/protocol.rs` with Unknown-tolerant parsing; never `deny_unknown_fields` (wire spec §5.2).
+- Runtime-bin companion crate (durable item `runtime-bin-delivery`, tracked in `.mstar/projects/_default/roadmap.md` § Deferred): platform matrix is linux-x64 / linux-arm64 / macos-arm64 (CI publishes exactly these three; macOS needs the sibling `-spawn-helper`).
+- Protocol bumps (`serverInfo.version` leaving 0.0.1): revisit the strict-name check and the no-negotiation stance together (wire spec §7.4).
 
 ## Examples
 
-- `tests/run_semantics.rs` (13 tests) pins the interval algorithm: receipt gating, pre-receipt drop, non-root idle ignored, transport ordering, fail-fast arms.
-- `tests/client_lifecycle.rs` (13 tests) pins transport/client behavior incl. malformed-line tolerance and close-ladder escalation.
-- Source doc promoted from: `iteration:v0.1/specs/python-parity-surface.md` (structured rewrite; the iteration spec remains the frozen v0.1 snapshot).
+- `tests/run_semantics.rs` (16 tests) pins the interval algorithm: receipt gating, pre-receipt drop, non-root idle ignored, transport ordering, fail-fast arms.
+- `tests/client_lifecycle.rs` (19 tests) pins transport/client behavior incl. malformed-line tolerance and close-ladder escalation.

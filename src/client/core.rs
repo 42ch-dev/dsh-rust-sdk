@@ -2,7 +2,7 @@
 //! [`ClientTimeouts`], and the public request helpers.
 
 use std::collections::HashMap;
-use std::io;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -29,14 +29,26 @@ use super::{
     DEFAULT_BROADCAST_CAPACITY,
 };
 
+/// The environment keys the crate MUST never write into the child
+/// environment, under any configuration (spec §4.2). None has a reader
+/// upstream: the bundled `cordis.yml` consuming `DSH_CORDIS_CONFIG` was
+/// deleted, sessions live under `$DSH_HOME/sessions`, and the workspace cwd
+/// reaches the runtime through `initialize.cwd` (spec §4.2 evidence).
+///
+/// Enforced at the spawn layer — the child inherits the parent environment
+/// wholesale, so the keys are stripped from the inherited env here — and in
+/// the compose filter (`crate::runtime::compose_env_with_home`).
+pub(crate) const FORBIDDEN_ENV_KEYS: [&str; 3] =
+    ["DSH_CORDIS_CONFIG", "DSH_SESSION_ROOT", "DSH_CWD"];
+
 /// How to launch the runtime process (the official
 /// `deepseek-harness-sdk-runtime` binary).
 #[derive(Debug, Clone)]
 pub struct LaunchSpec {
     /// Path to (or name of) the runtime executable.
-    pub program: String,
+    pub program: PathBuf,
     /// Extra command-line arguments passed to the runtime.
-    pub args: Vec<String>,
+    pub args: Vec<OsString>,
     /// Environment overrides; the parent environment is inherited and these
     /// entries are layered on top.
     pub envs: HashMap<String, String>,
@@ -51,6 +63,15 @@ pub struct LaunchSpec {
 /// gives the runtime time to flush durable state after stdin closes.
 #[derive(Debug, Clone, Copy)]
 pub struct ClientTimeouts {
+    /// Bound for the `initialize` handshake request only (spec §6.4).
+    /// `None` waits indefinitely. The activity interval and
+    /// `session/prompt` keep using [`ClientTimeouts::request_timeout`]
+    /// (Python parity: `initialize_timeout_seconds` vs
+    /// `request_timeout_seconds`). The high-level
+    /// [`Config::initialize_timeout`](crate::runtime::Config::initialize_timeout)
+    /// carries the Python-parity 30 s default and is copied here by
+    /// [`DeepSeekHarness::start`](crate::api::DeepSeekHarness::start).
+    pub initialize_timeout: Option<Duration>,
     /// Per-request response deadline. `None` waits indefinitely (the Python
     /// SDK default). There is no wire-level cancellation: on timeout the
     /// client abandons the wait and removes the pending entry, while the
@@ -69,6 +90,7 @@ pub struct ClientTimeouts {
 impl Default for ClientTimeouts {
     fn default() -> Self {
         Self {
+            initialize_timeout: None,
             request_timeout: None,
             shutdown_timeout: Duration::from_secs(1),
             eof_grace: Duration::from_secs(6),
@@ -149,14 +171,25 @@ impl HarnessClient {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // Spec §4.2: the three forbidden keys MUST NOT reach the child under
+        // any configuration. The override set filters them from
+        // `Config::env`, but the child also inherits the parent environment
+        // wholesale — strip them here so a parent-exported
+        // `DSH_CORDIS_CONFIG` / `DSH_SESSION_ROOT` / `DSH_CWD` can never
+        // leak into the runtime (AC1). The rest of the parent env is
+        // inherited untouched (no `env_clear`).
+        for key in FORBIDDEN_ENV_KEYS {
+            command.env_remove(key);
+        }
         if let Some(cwd) = &spec.cwd {
             command.current_dir(cwd);
         }
+        // A spawn failure — including ENOENT for a configured-but-missing
+        // program — is an I/O error (spec §7). `Error::RuntimeNotFound` is
+        // reserved for "no runtime could be resolved" (spec §8), which
+        // `resolve_runtime` reports before spawn.
         let mut child = match command.spawn() {
             Ok(child) => child,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                return Err(Error::RuntimeNotFound(format!("{}: {err}", spec.program)));
-            }
             Err(err) => return Err(Error::Io(err)),
         };
         let stdin = child
@@ -223,6 +256,22 @@ impl HarnessClient {
     /// unknown ids are dropped. When the runtime is already dead (or spawn
     /// failed), fails fast with the exit code and captured stderr tail.
     pub async fn request(&self, method: &str, params: Option<Value>) -> Result<Value, Error> {
+        self.request_with_timeout(method, params, self.timeouts.request_timeout, None)
+            .await
+    }
+
+    /// [`HarnessClient::request`] with an explicit response deadline and
+    /// timeout-diagnostic profile, so the `initialize` handshake can apply
+    /// its own bound ([`ClientTimeouts::initialize_timeout`], spec §6.4)
+    /// while every other request keeps the generic
+    /// [`ClientTimeouts::request_timeout`].
+    async fn request_with_timeout(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        timeout: Option<Duration>,
+        profile: Option<String>,
+    ) -> Result<Value, Error> {
         // Fast-fail on a closed or dead runtime, with process context.
         {
             let st = lock(&self.state);
@@ -288,7 +337,7 @@ impl HarnessClient {
             }
         }
 
-        let outcome = match self.timeouts.request_timeout {
+        let outcome = match timeout {
             Some(duration) => match tokio::time::timeout(duration, rx).await {
                 Ok(result) => result,
                 Err(elapsed) => {
@@ -296,8 +345,13 @@ impl HarnessClient {
                     // response is dropped; the server-side work continues.
                     lock(&self.pending).remove(&id);
                     return Err(Error::RequestTimeout {
+                        // The method stays the exact wire method name (spec
+                        // §7); the selected profile, when the handshake had
+                        // one, rides in the public `profile` field and is
+                        // rendered in the message.
                         method: method.to_string(),
                         source: elapsed,
+                        profile,
                     });
                 }
             },
@@ -321,12 +375,51 @@ impl HarnessClient {
     /// `deepseek-harness-sdk-runtime`, or when `version` is absent — the
     /// protocol declares the name wire-stable and has no version negotiation,
     /// so an unexpected identity is a hard protocol error.
+    ///
+    /// `reasoning_effort` is sent as the wire key `reasoningEffort`;
+    /// `None`, empty, and whitespace-only values are dropped by the wire
+    /// type itself ([`InitializeParams::reasoning_effort`], spec §6.3), so
+    /// this low-level path can never send a blank value. The high-level
+    /// path ([`DeepSeekHarness::start`](crate::api::DeepSeekHarness::start))
+    /// additionally normalizes
+    /// [`Config::reasoning_effort`](crate::runtime::Config::reasoning_effort)
+    /// through `Config::reasoning_effort_for_wire`, which drops empty and
+    /// whitespace-only values before they reach this call.
+    ///
+    /// The handshake is bounded by [`ClientTimeouts::initialize_timeout`]
+    /// (spec §6.4) — the bound applies to the handshake only, never to
+    /// `session/prompt` or the activity interval, which keep using
+    /// [`ClientTimeouts::request_timeout`]. On expiry the error is
+    /// [`Error::RequestTimeout`]; the high-level
+    /// [`DeepSeekHarness::start`](crate::api::DeepSeekHarness::start) path
+    /// names the selected profile in the message (spec §7).
     pub async fn initialize(
         &mut self,
         cwd: impl Into<String>,
         provider: impl Into<String>,
         model: impl Into<String>,
+        reasoning_effort: Option<&str>,
         max_tokens: Option<u32>,
+    ) -> Result<InitializeResult, Error> {
+        self.initialize_with_profile(cwd, provider, model, reasoning_effort, max_tokens, None)
+            .await
+    }
+
+    /// [`HarnessClient::initialize`] with the selected profile threaded to
+    /// the timeout diagnostic (spec §7).
+    ///
+    /// `pub(crate)` so the high-level
+    /// [`DeepSeekHarness::start`](crate::api::DeepSeekHarness::start) path
+    /// names the profile in the timeout message while the public low-level
+    /// signature stays unchanged.
+    pub(crate) async fn initialize_with_profile(
+        &mut self,
+        cwd: impl Into<String>,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        reasoning_effort: Option<&str>,
+        max_tokens: Option<u32>,
+        profile: Option<String>,
     ) -> Result<InitializeResult, Error> {
         if max_tokens == Some(0) {
             return Err(Error::SdkProtocol {
@@ -337,10 +430,16 @@ impl HarnessClient {
             cwd: cwd.into(),
             provider: provider.into(),
             model: model.into(),
+            reasoning_effort: reasoning_effort.map(str::to_string),
             max_tokens,
         };
         let result = self
-            .request("initialize", Some(serde_json::to_value(params)?))
+            .request_with_timeout(
+                "initialize",
+                Some(serde_json::to_value(params)?),
+                self.timeouts.initialize_timeout,
+                profile,
+            )
             .await?;
         let init: InitializeResult =
             serde_json::from_value(result).map_err(|err| Error::SdkProtocol {

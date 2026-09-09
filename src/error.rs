@@ -1,4 +1,23 @@
 use serde_json::Value;
+use std::fmt;
+
+/// Renders the selected-profile suffix for the timeout message
+/// Python-style (` (selected dsh profile 'sdk')`) when a profile is
+/// present (spec §7; Python appends `selected dsh profile {profile!r}` —
+/// `python/sdk/src/deepseek_harness/client.py:158-160`).
+///
+/// `Option<String>` has no `Display`, so the thiserror format string
+/// passes the profile through this wrapper as an explicit argument.
+struct ProfileSuffix<'a>(Option<&'a str>);
+
+impl fmt::Display for ProfileSuffix<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Some(profile) => write!(f, " (selected dsh profile '{profile}')"),
+            None => Ok(()),
+        }
+    }
+}
 
 /// Typed error taxonomy for the DeepSeek Harness SDK.
 ///
@@ -14,13 +33,28 @@ pub enum Error {
     TransportClosed(String),
 
     /// A request did not get a response within the configured timeout.
-    #[error("{method} timed out waiting for DeepSeek Harness runtime: {source}")]
+    ///
+    /// `method` is exactly the wire method name; `profile` names the
+    /// selected DSH profile when the handshake had one, rendered in the
+    /// message so a wedged handshake is diagnosable (spec §7; Python
+    /// appends `selected dsh profile {profile!r}` —
+    /// `python/sdk/src/deepseek_harness/client.py:158-160`).
+    #[error(
+        "{method} timed out waiting for DeepSeek Harness runtime: {source}{}",
+        ProfileSuffix(profile.as_deref()),
+    )]
     RequestTimeout {
-        /// The JSON-RPC method that timed out.
+        /// The JSON-RPC method that timed out — exactly the wire method
+        /// name (spec §7).
         method: String,
         /// The underlying timeout error.
         #[source]
         source: tokio::time::error::Elapsed,
+        /// The selected DSH profile for the launch, when the handshake
+        /// had one, named in the rendered message (spec §7; Python
+        /// appends `selected dsh profile {profile!r}` —
+        /// `python/sdk/src/deepseek_harness/client.py:158-160`).
+        profile: Option<String>,
     },
 
     /// A protocol-level violation: the runtime's behavior contradicts the
@@ -41,9 +75,19 @@ pub enum Error {
         data: Option<Value>,
     },
 
-    /// The runtime binary is missing or not launchable.
-    #[error("runtime is missing or not launchable: {0}")]
+    /// No runtime binary could be resolved: no `dsh_bin` and no non-empty
+    /// `DSH_RUNTIME_BIN` (spec §7). Reserved for unresolved acquisition
+    /// (spec §8); a configured program that fails to spawn is
+    /// [`Error::Io`](Error::Io).
+    #[error("no runtime binary could be resolved: {0}")]
     RuntimeNotFound(String),
+
+    /// A configuration error: the caller's [`Config`](crate::runtime::Config)
+    /// cannot launch a runtime (e.g. an empty `profile`), rejected locally
+    /// before spawn (upstream `apps/cli/src/args.ts:148-149` rejects an
+    /// empty `--profile`; spec §2.2.6, §7).
+    #[error("invalid configuration: {0}")]
+    Config(String),
 
     /// An I/O error (spawn, stdio, transport).
     #[error(transparent)]
@@ -90,10 +134,29 @@ mod tests {
         let err = Error::RequestTimeout {
             method: "initialize".into(),
             source: elapsed().await,
+            profile: None,
         };
         assert_eq!(
             err.to_string(),
             "initialize timed out waiting for DeepSeek Harness runtime: deadline has elapsed"
+        );
+    }
+
+    #[tokio::test]
+    async fn display_request_timeout_names_profile_in_message() {
+        // The profile is a public `Option<String>` field (spec §7; Python
+        // appends `selected dsh profile {profile!r}`), rendered in the
+        // message when present, while `method` stays the exact wire method
+        // name.
+        let err = Error::RequestTimeout {
+            method: "initialize".into(),
+            source: elapsed().await,
+            profile: Some("sdk".into()),
+        };
+        assert_eq!(
+            err.to_string(),
+            "initialize timed out waiting for DeepSeek Harness runtime: \
+             deadline has elapsed (selected dsh profile 'sdk')"
         );
     }
 
@@ -126,7 +189,16 @@ mod tests {
         let err = Error::RuntimeNotFound("no dsh runtime on PATH".into());
         assert_eq!(
             err.to_string(),
-            "runtime is missing or not launchable: no dsh runtime on PATH"
+            "no runtime binary could be resolved: no dsh runtime on PATH"
+        );
+    }
+
+    #[test]
+    fn display_config() {
+        let err = Error::Config("profile must not be empty".into());
+        assert_eq!(
+            err.to_string(),
+            "invalid configuration: profile must not be empty"
         );
     }
 
@@ -155,6 +227,7 @@ mod tests {
         assert!(!Error::RequestTimeout {
             method: "m".into(),
             source: elapsed().await,
+            profile: None,
         }
         .is_protocol());
         assert!(!Error::JsonRpc {
@@ -164,6 +237,7 @@ mod tests {
         }
         .is_protocol());
         assert!(!Error::RuntimeNotFound("x".into()).is_protocol());
+        assert!(!Error::Config("x".into()).is_protocol());
         assert!(!Error::Io(std::io::Error::other("io")).is_protocol());
         assert!(!Error::Json(serde_json::from_str::<Value>("x").unwrap_err()).is_protocol());
     }

@@ -10,18 +10,20 @@
 //! [`RunResult::final_response`] and [`RunResult::finish_reason`] exactly as
 //! the Python SDK does.
 //!
-//! [`RunResult`] follows the **Python** SDK field set, including
-//! `finish_reason` and `session_root`; the TypeScript SDK's `RunResult`
-//! lacks both fields, and Rust intentionally does not claim TypeScript
-//! surface parity.
+//! [`RunResult`] mirrors the **Python** SDK's five fields exactly
+//! (`session_id`, `final_response`, `finish_reason`, `events`,
+//! `notifications`; upstream `python/sdk/src/deepseek_harness/api.py:40-46`);
+//! the TypeScript SDK's `RunResult` lacks `finish_reason`, and Rust
+//! intentionally does not claim TypeScript surface parity.
 //!
 //! The runtime binary is bring-your-own (Plan A): [`DeepSeekHarness::start`]
-//! resolves it from `Config::runtime_bin` / `launch_args_override` or the
-//! `DSH_RUNTIME_BIN` environment variable. This crate never downloads or
-//! bundles a runtime. The official runtime and its sources live at
+//! resolves it from `Config::dsh_bin` or the `DSH_RUNTIME_BIN` environment
+//! variable and boots it under the configured `profile` (`dsh --profile
+//! <name> [--patch <path>]...`). This crate never downloads or bundles a
+//! runtime. The official runtime and its sources live at
 //! <https://github.com/deepseek-ai/deepseek-harness>.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use uuid::Uuid;
@@ -31,7 +33,9 @@ use crate::client::{
 };
 use crate::error::Error;
 use crate::protocol::{ContentBlock, Notification};
-use crate::runtime::{compose_env, resolve_runtime, Config};
+use crate::runtime::{
+    compose_env_with_home, env_var_non_empty, resolve_dsh_home_with, resolve_runtime, Config,
+};
 
 /// A running DeepSeek Harness instance, Python `DeepSeekHarness` parity.
 ///
@@ -43,9 +47,10 @@ use crate::runtime::{compose_env, resolve_runtime, Config};
 #[derive(Debug)]
 pub struct DeepSeekHarness {
     client: tokio::sync::Mutex<HarnessClient>,
-    /// The configured session root (`DSH_SESSION_ROOT`), surfaced on every
-    /// [`RunResult`] (Python extension field; TypeScript lacks it).
-    session_root: Option<PathBuf>,
+    /// The resolved absolute harness home this instance was launched with
+    /// (spec §3.2.4 observability; the value created at boot and injected
+    /// into the child as `DSH_HOME`).
+    dsh_home: PathBuf,
 }
 
 impl DeepSeekHarness {
@@ -53,22 +58,35 @@ impl DeepSeekHarness {
     /// subprocess, and perform the `initialize` handshake.
     ///
     /// `Config::cwd` is resolved absolute (Python `Path(cwd).resolve()`) and
-    /// feeds both `DSH_CWD` and `initialize.cwd`; a nonexistent cwd fails
-    /// with [`Error::Io`]. The runtime subprocess cwd defaults to the same
-    /// resolved cwd (`Config::runtime_cwd` overrides it — Python parity).
+    /// feeds `initialize.cwd`; a nonexistent cwd fails with [`Error::Io`].
+    /// The runtime subprocess cwd defaults to the same resolved cwd
+    /// (`Config::runtime_cwd` overrides it — Python parity).
     ///
-    /// [`Config::request_timeout`] bounds every request, including
-    /// `session/prompt`; `None` (the default) waits indefinitely.
+    /// The child env carries the resolved `DSH_HOME`, the caller's
+    /// `Config::env` entries, and `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY`
+    /// when configured (spec §4). The resolved harness home is created when
+    /// absent so a fresh home boots (spec §3.2.5); the selection is
+    /// observable through [`Config::resolve_dsh_home`] (spec §3.2.4) and
+    /// the instance accessor [`DeepSeekHarness::dsh_home`].
     ///
-    /// A failure to extract or verify the bundled default `cordis.yml`
-    /// (when no effective `DSH_CORDIS_CONFIG` exists) propagates as
-    /// [`Error::Io`] — the required default-config injection never degrades
-    /// silently to a config-less launch.
+    /// [`Config::initialize_timeout`] bounds the `initialize` handshake
+    /// only (spec §6.4); [`Config::request_timeout`] bounds every other
+    /// request, including `session/prompt`; `None` (the default) waits
+    /// indefinitely.
     ///
     /// On `initialize` failure the close ladder is run before the error
     /// propagates, so the spawned child is never leaked (Python parity).
     pub async fn start(config: Config) -> Result<Self, Error> {
         let launch = resolve_runtime(&config)?;
+        // Resolve the harness home once and create it when absent so a
+        // fresh home boots (spec §3.2.5); the resolved value is observable
+        // through `Config::resolve_dsh_home` (spec §3.2.4) and the instance
+        // accessor [`DeepSeekHarness::dsh_home`]. The same value is passed
+        // into the compose path, so the created/logged home and the
+        // injected child `DSH_HOME` are identical (spec §3.2.3; F7).
+        let dsh_home = resolve_dsh_home_with(&config, &env_var_non_empty);
+        std::fs::create_dir_all(&dsh_home).map_err(Error::Io)?;
+        tracing::info!(dsh_home = %dsh_home.display(), "resolved DSH_HOME");
         let cwd = match &config.cwd {
             Some(path) => path.canonicalize().map_err(Error::Io)?,
             None => std::env::current_dir().map_err(Error::Io)?,
@@ -76,21 +94,27 @@ impl DeepSeekHarness {
         let spec = LaunchSpec {
             program: launch.program,
             args: launch.args,
-            envs: compose_env(&config, &cwd)?.into_iter().collect(),
+            envs: compose_env_with_home(&config, &dsh_home)?
+                .into_iter()
+                .collect(),
             cwd: Some(config.runtime_cwd.clone().unwrap_or_else(|| cwd.clone())),
         };
-        // `Config::request_timeout` is the Python-parity request deadline
-        // (`None` = wait indefinitely); `Config::timeouts` supplies the
-        // close-ladder timings.
+        // `Config::initialize_timeout` bounds the handshake only (spec
+        // §6.4); `Config::request_timeout` is the Python-parity request
+        // deadline (`None` = wait indefinitely); `Config::timeouts`
+        // supplies the close-ladder timings.
         let mut timeouts = config.timeouts;
         timeouts.request_timeout = config.request_timeout;
+        timeouts.initialize_timeout = config.initialize_timeout;
         let mut client = HarnessClient::spawn(spec, timeouts)?;
         if let Err(err) = client
-            .initialize(
+            .initialize_with_profile(
                 cwd.to_string_lossy().into_owned(),
                 &config.provider,
                 &config.model,
+                config.reasoning_effort_for_wire(),
                 config.max_tokens,
+                Some(config.profile.clone()),
             )
             .await
         {
@@ -108,8 +132,20 @@ impl DeepSeekHarness {
         }
         Ok(Self {
             client: tokio::sync::Mutex::new(client),
-            session_root: config.session_root.map(PathBuf::from),
+            dsh_home,
         })
+    }
+
+    /// The resolved absolute harness home this instance was launched with
+    /// (spec §3.2.4 observability; plan Task 2 accessor). The value is the
+    /// home resolved at boot — `Config::dsh_home` → non-empty `DSH_HOME`
+    /// (from `Config::env`, then the parent environment) → `~/.dsh`,
+    /// normalized absolute with `~` expanded (upstream `resolveDshHome`,
+    /// `packages/util/home-paths/src/index.ts:87-91`) — created when
+    /// absent and injected into the child as `DSH_HOME` (spec §3.2.3,
+    /// §3.2.5).
+    pub fn dsh_home(&self) -> &Path {
+        &self.dsh_home
     }
 
     /// Shut the runtime down and reap it (the plan 01 close ladder).
@@ -189,7 +225,37 @@ impl Session<'_> {
     /// malformed notification; Rust surfaces the same condition as a typed
     /// error instead of silently dropping an event or misreading the idle
     /// termination.
-    pub async fn run(&self, input: Input) -> Result<RunResult, Error> {
+    ///
+    /// # Per-notification callback
+    ///
+    /// `on_notification` observes **every notification delivered to this
+    /// run's session-tree subscription, in wire order** — including
+    /// `session.event`, `session.status`, and `subagent.*` — and is invoked
+    /// as each notification arrives, not deferred until the run ends. It is
+    /// a layer over the existing subscription path, never a second
+    /// subscription: the run already owns one tree subscription, and the
+    /// callback neither filters nor consumes. Passing `None` behaves
+    /// exactly like the no-callback path, and the returned [`RunResult`] is
+    /// identical with or without a callback (spec §6.5; upstream
+    /// `packages/sdk/client/src/api.ts:150-156,186-200`,
+    /// `python/sdk/src/deepseek_harness/api.py:124-131,139-144`).
+    ///
+    /// The callback is invoked **before** the run's lag gate: a lagged
+    /// `recv()` can still return a retained notification, and that
+    /// delivered notification is observed even though the run then fails
+    /// fast with the lag error instead of trusting a truncated stream.
+    ///
+    /// The bound is `Fn(&Notification) + Send + Sync`, not `FnMut`: a
+    /// caller needing shared mutable state captures an `Arc<Mutex<..>>` by
+    /// interior mutability, and [`Session::run`] keeps taking `&self` — the
+    /// callback never requires giving up ownership of the session. A panic
+    /// in the callback is a caller bug and propagates; the crate does not
+    /// swallow it (spec §6.5).
+    pub async fn run(
+        &self,
+        input: Input,
+        on_notification: Option<&(dyn Fn(&Notification) + Send + Sync)>,
+    ) -> Result<RunResult, Error> {
         let content_blocks = match input {
             Input::Text(text) => vec![ContentBlock::Text { text }],
             Input::Blocks(blocks) => blocks,
@@ -209,9 +275,18 @@ impl Session<'_> {
 
         // Phase 1 — the durable inbox receipt of this exact message.
         // Notifications before it are dropped from both `events` and
-        // `notifications` (Python parity).
+        // `notifications` (Python parity), but the callback still observes
+        // them: it sees every notification the subscription delivers, in
+        // wire order (spec §6.5).
         let receipt = loop {
             let notification = subscription.recv().await?;
+            // The callback runs before the lag gate: a lagged `recv()` can
+            // still return a retained notification, and that delivered
+            // notification must be observed even though the run then fails
+            // fast on the truncated stream (spec §6.5 rule 1).
+            if let Some(callback) = on_notification {
+                callback(&notification);
+            }
             ensure_no_lag(&mut subscription)?;
             let is_receipt = match notification.session_event() {
                 Some(Ok(event)) => {
@@ -308,6 +383,11 @@ impl Session<'_> {
                 break;
             }
             notification = subscription.recv().await?;
+            // Same ordering as the receipt wait: the callback observes the
+            // delivered notification before the lag gate can fail the run.
+            if let Some(callback) = on_notification {
+                callback(&notification);
+            }
             ensure_no_lag(&mut subscription)?;
         }
 
@@ -319,7 +399,6 @@ impl Session<'_> {
             finish_reason,
             events,
             notifications,
-            session_root: self.harness.session_root.clone(),
         })
     }
 }
@@ -353,8 +432,11 @@ pub enum Input {
 }
 
 /// The result of one [`Session::run`], field-for-field the **Python** SDK's
-/// `RunResult` (the TypeScript SDK's `RunResult` lacks `finish_reason` and
-/// `session_root`; Rust intentionally follows Python).
+/// `RunResult` (upstream `python/sdk/src/deepseek_harness/api.py:40-46`):
+/// exactly the five Python fields of spec §6.2 — the v0.1 session-root
+/// path field is dropped, with no replacement (spec §5). The TypeScript
+/// SDK's `RunResult` lacks `finish_reason`; Rust intentionally follows
+/// Python.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunResult {
     /// The SDK session id this turn ran on.
@@ -363,19 +445,17 @@ pub struct RunResult {
     /// text blocks (`text: null` or a non-string `text` contributes `""`);
     /// `""` when the activity interval contains no `assistant/message` — or
     /// the last one has no text blocks. Never falls back to an earlier
-    /// event.
+    /// event (Python algorithm, `python/sdk/src/deepseek_harness/api.py:211-228`).
     pub final_response: String,
     /// The last root `turn/end` event's `data.reason.kind` inside the
-    /// activity interval (`None` when the window has no `turn/end`).
+    /// activity interval (`None` when the window has no `turn/end`; Python
+    /// algorithm, `python/sdk/src/deepseek_harness/api.py:231-248`).
     pub finish_reason: Option<String>,
     /// Root-session `session.event` payloads only, in transport order.
     pub events: Vec<Value>,
     /// Every tree notification (root + discovered descendants, incl.
     /// `session.status` / `subagent.*`), in transport order.
     pub notifications: Vec<Notification>,
-    /// The configured session root (`DSH_SESSION_ROOT`), Python extension
-    /// field.
-    pub session_root: Option<PathBuf>,
 }
 
 /// Extract the finish reason from a collected activity interval, Python
@@ -461,6 +541,35 @@ mod tests {
 
     fn unrelated_event() -> Value {
         json!({"type": "assistant/message", "data": {"content": []}})
+    }
+
+    /// Compile-time spec §6.2 assertion: `RunResult` has exactly the five
+    /// Python fields. Both the construction and the exhaustive destructure
+    /// name every field — no `..`, no `_` — so a field added (including a
+    /// resurrection of the v0.1 session-root path), renamed, or removed
+    /// fails the build. This guards the field set only; it does not prove
+    /// the absence of an accessor method.
+    #[test]
+    fn run_result_has_exactly_the_five_python_fields() {
+        let result = RunResult {
+            session_id: "session-1".to_string(),
+            final_response: "hello".to_string(),
+            finish_reason: Some("completed".to_string()),
+            events: vec![],
+            notifications: vec![],
+        };
+        let RunResult {
+            session_id,
+            final_response,
+            finish_reason,
+            events,
+            notifications,
+        } = result;
+        assert_eq!(session_id, "session-1");
+        assert_eq!(final_response, "hello");
+        assert_eq!(finish_reason.as_deref(), Some("completed"));
+        assert!(events.is_empty());
+        assert!(notifications.is_empty());
     }
 
     #[test]
