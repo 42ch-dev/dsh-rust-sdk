@@ -219,8 +219,9 @@ pub struct RuntimeLaunch {
 /// 2. `DSH_RUNTIME_BIN` from the parent environment;
 /// 3. [`Error::RuntimeNotFound`] whose message names the three acquisition
 ///    routes (bring-your-own, the npm-published `dsh` CLI via
-///    `npm install -g @deepseek-ai/dsh`, and building the official runtime
-///    via `scripts/build-exe-for-python-sdk.ts`) and cites
+///    `npm install -g @deepseek-ai/dsh` — the bin is a Node.js script, so
+///    Node.js must be on `PATH` — and building the official runtime via
+///    `scripts/build-exe-for-python-sdk.ts`) and cites
 ///    <https://github.com/deepseek-ai/deepseek-harness>.
 ///
 /// The argv is composed from the launch grammar `dsh --profile <name>
