@@ -108,7 +108,7 @@ executable (`node-pty`), and the Linux/macOS wheels carry a `-rg` ripgrep
 sidecar (Windows `-rg.exe`) — copy any sidecar along when you relocate the
 executable.
 
-Two routes to a runtime:
+Three routes to a runtime:
 
 ### Route A — the platform wheel (recommended)
 
@@ -129,6 +129,22 @@ Build the runtime executable from source with the
 [official repository](https://github.com/deepseek-ai/deepseek-harness), then
 point `DSH_RUNTIME_BIN` (or `Config::dsh_bin`) at the built executable. This
 is the route to use when the published wheel does not cover your platform.
+
+### Route C — the npm-published CLI
+
+```sh
+npm install -g @deepseek-ai/dsh
+export DSH_RUNTIME_BIN="$(command -v dsh)"
+```
+
+The `dsh` CLI is published on npm as `@deepseek-ai/dsh`. A bare
+`npm install -g @deepseek-ai/dsh` installs the `latest` dist-tag;
+`npm install -g @deepseek-ai/dsh@alpha` installs the newest `alpha`
+release. The installed bin is a Node.js script, so **Node.js must be on
+`PATH`** for the SDK to launch it. The crate spawns the resolved program
+directly without a shell, and the npm bin is a Node.js script rather than
+a native executable — on Windows, prefer the self-contained wheel/exe
+route (Route A).
 
 ### How the SDK resolves the runtime
 

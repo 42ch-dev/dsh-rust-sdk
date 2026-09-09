@@ -101,7 +101,7 @@ x64、Linux arm64、macOS arm64、macOS x64、Windows x64**（Windows 使用
 （`node-pty`），Linux/macOS wheel 携带 `-rg` ripgrep 伴随文件（Windows 为
 `-rg.exe`）——移动可执行文件时请把伴随文件一并复制。
 
-两条获取途径：
+三条获取途径：
 
 ### 途径 A —— 平台 wheel（推荐）
 
@@ -120,6 +120,21 @@ export DSH_RUNTIME_BIN="$(python -c 'import deepseek_harness_runtime as r; print
 `build-exe-for-python-sdk` 脚本构建运行时可执行文件，然后把
 `DSH_RUNTIME_BIN`（或 `Config::dsh_bin`）指向构建产物。当已发布的 wheel
 不覆盖你的平台时，使用这条途径。
+
+### 途径 C —— npm 发布的 CLI
+
+```sh
+npm install -g @deepseek-ai/dsh
+export DSH_RUNTIME_BIN="$(command -v dsh)"
+```
+
+`dsh` CLI 以 `@deepseek-ai/dsh` 发布在 npm 上。裸的
+`npm install -g @deepseek-ai/dsh` 安装 `latest` dist-tag；
+`npm install -g @deepseek-ai/dsh@alpha` 安装最新的 `alpha` 版本。安装的
+bin 是 Node.js 脚本，因此 **Node.js 必须在 `PATH` 上**，SDK 才能启动它。
+crate 直接启动解析出的程序（不经 shell），而 npm bin 是 Node.js 脚本而
+非原生可执行文件——在 Windows 上请优先使用自包含的 wheel/exe 途径
+（途径 A）。
 
 ### SDK 如何解析运行时
 
