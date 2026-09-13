@@ -16,8 +16,7 @@ use uuid::Uuid;
 
 use crate::error::Error;
 use crate::protocol::{
-    ContentBlock, InitializeParams, InitializeResult, Notification, SessionPromptParams,
-    SessionPromptResult,
+    ContentBlock, InitializeParams, InitializeResult, SessionPromptParams, SessionPromptResult,
 };
 use crate::transport::{write_frame, JsonRpcLineTransport};
 
@@ -25,7 +24,7 @@ use super::read_loop::{read_loop, stderr_loop, ReadContext};
 use super::session_tree::ParentMap;
 use super::subscription::NotificationSubscription;
 use super::{
-    closed_error, lock, try_register_pending, PendingRequests, SharedState,
+    closed_error, lock, try_register_pending, NotificationsProducer, PendingRequests, SharedState,
     DEFAULT_BROADCAST_CAPACITY,
 };
 
@@ -121,9 +120,13 @@ pub struct HarnessClient {
     pub(super) parent_map: Arc<Mutex<ParentMap>>,
     /// Shared client state (exit code, closed flag, stderr tail).
     pub(super) state: Arc<Mutex<SharedState>>,
-    /// Notification producer; `None` after close (subscriptions then drain
-    /// their queues and see the channel close).
-    pub(super) notifications: Option<broadcast::Sender<Notification>>,
+    /// Shared notification broadcast producer; `None` (inside the inner
+    /// `Option`) after close or read-loop EOF, which closes the channel and
+    /// resolves any parked `NotificationSubscription::recv()` with
+    /// [`Error::TransportClosed`]. Shared with the read loop so the EOF
+    /// path can drop the original `Sender` (mirroring `close()`'s
+    /// `finish_teardown`) — see [`NotificationsProducer`](super::NotificationsProducer).
+    pub(super) notifications: super::NotificationsProducer,
     /// The stdout read-loop task, joined by [`HarnessClient::close`].
     pub(super) read_task: Option<JoinHandle<()>>,
     /// The stderr-capture task.
@@ -209,6 +212,15 @@ impl HarnessClient {
         let parent_map = Arc::new(Mutex::new(ParentMap::new()));
         let state = Arc::new(Mutex::new(SharedState::default()));
         let (notifications, _) = broadcast::channel(broadcast_capacity.max(1));
+        // The original `Sender` lives inside a shared `NotificationsProducer`
+        // (an `Arc<Mutex<Option<Sender>>>`) so the read loop's EOF path and
+        // `close()`'s teardown can both drop it by setting the inner to
+        // `None`. This closes the broadcast channel: a `recv()` parked in
+        // `Receiver::recv().await` then resolves with `RecvError::Closed` →
+        // `Error::TransportClosed` (the documented contract). The read loop
+        // receives a clone of the `Arc`; subscriptions clone the `Sender` for
+        // a `Receiver` under the mutex.
+        let notifications: NotificationsProducer = Arc::new(Mutex::new(Some(notifications)));
 
         let stdin_shared = Arc::new(tokio::sync::Mutex::new(stdin));
         let child_shared = Arc::new(tokio::sync::Mutex::new(child));
@@ -219,7 +231,7 @@ impl HarnessClient {
             child: Arc::downgrade(&child_shared),
             pending: Arc::clone(&pending),
             parent_map: Arc::clone(&parent_map),
-            notifications: notifications.clone(),
+            notifications: Arc::clone(&notifications),
             state: Arc::clone(&state),
             stderr_done: Arc::clone(&stderr_done),
         };
@@ -238,7 +250,7 @@ impl HarnessClient {
             pending,
             parent_map,
             state,
-            notifications: Some(notifications),
+            notifications,
             read_task: Some(read_task),
             stderr_task: Some(stderr_task),
             timeouts,
@@ -490,17 +502,83 @@ impl HarnessClient {
     /// The filter consults the live edge map, so a child started after the
     /// subscription is matched from its first event onward.
     ///
-    /// A subscription created after close/runtime death is born-failed.
+    /// A subscription created after close/runtime death is born-failed:
+    /// [`NotificationSubscription::recv`] rejects immediately with
+    /// [`Error::TransportClosed`]. The producer is shared with the read loop
+    /// (see [`NotificationsProducer`](super::NotificationsProducer)), so
+    /// once the EOF path or `close()` has dropped the `Sender`, the
+    /// `Option` is `None` and a fresh subscription gets no `Receiver`.
     pub fn subscribe_session_tree(&self, root: &str) -> NotificationSubscription {
         NotificationSubscription {
-            receiver: self
-                .notifications
+            receiver: lock(&self.notifications)
                 .as_ref()
                 .map(broadcast::Sender::subscribe),
             parent_map: Arc::clone(&self.parent_map),
             state: Arc::clone(&self.state),
             root: root.to_string(),
             lagged: false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::Notification;
+
+    /// Build a `HarnessClient` skeleton carrying only the fields
+    /// `subscribe_session_tree` consults (the producer, parent map, and
+    /// state). The task / child / stdin handles are `None`, so dropping the
+    /// client runs the no-op tail of `Drop` (no background tasks to abort).
+    fn client_with_notifications(notifications: NotificationsProducer) -> HarnessClient {
+        HarnessClient {
+            child: None,
+            stdin: None,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            parent_map: Arc::new(Mutex::new(ParentMap::new())),
+            state: Arc::new(Mutex::new(SharedState::default())),
+            notifications,
+            read_task: None,
+            stderr_task: None,
+            timeouts: ClientTimeouts::default(),
+        }
+    }
+
+    #[test]
+    fn subscribe_session_tree_with_live_producer_returns_a_live_receiver() {
+        // Happy path: the producer is Some, so `subscribe_session_tree`
+        // returns a subscription carrying a live `broadcast::Receiver`.
+        let (tx, _rx) = broadcast::channel::<Notification>(4);
+        let client = client_with_notifications(Arc::new(Mutex::new(Some(tx))));
+        let subscription = client.subscribe_session_tree("root");
+        assert!(
+            subscription.receiver.is_some(),
+            "a subscription on a live client must start with a live receiver"
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_session_tree_after_producer_dropped_is_born_failed() {
+        // After the read loop's EOF path or `close()`'s `finish_teardown`
+        // takes the inner `Sender` (sets the producer's inner to `None`),
+        // a fresh subscription is born-failed — no `Receiver`, and
+        // `recv()` returns `TransportClosed` immediately. This is the doc
+        // contract: "A subscription created after close/runtime death is
+        // born-failed."
+        let client = client_with_notifications(Arc::new(Mutex::new(None)));
+        let mut subscription = client.subscribe_session_tree("root");
+        assert!(
+            subscription.receiver.is_none(),
+            "the subscription must be born-failed (no receiver) when the producer was dropped"
+        );
+        match subscription.recv().await {
+            Err(Error::TransportClosed(message)) => {
+                assert!(
+                    message.contains("DeepSeek Harness runtime closed"),
+                    "the closed reason rides in the diagnostics: {message}"
+                );
+            }
+            other => panic!("expected TransportClosed, got {other:?}"),
         }
     }
 }

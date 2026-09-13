@@ -149,6 +149,8 @@ fn drain_queued(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use serde_json::{json, Map, Value};
     use tokio::sync::broadcast;
 
@@ -227,5 +229,55 @@ mod tests {
             !subscription.take_lagged(),
             "no overflow since the last read → the flag stays clear"
         );
+    }
+
+    /// Regression for the parked-`recv` half of the EOF-death fix. When the
+    /// last broadcast `Sender` is dropped, the broadcast channel closes and
+    /// a parked `receiver.recv().await` resolves with `RecvError::Closed`,
+    /// which `recv()` surfaces as `Error::TransportClosed` with the
+    /// documented closed reason. The read loop's EOF path now triggers
+    /// exactly this path by taking the client-owned `Sender` via the
+    /// shared `NotificationsProducer`; parked-then-dropped is the
+    /// observation the bug used to miss. If this regresses, the outer
+    /// 2 s `tokio::time::timeout` fires and the test fails loudly.
+    #[tokio::test]
+    async fn recv_returns_transport_closed_when_channel_closes_while_recv_is_parked() {
+        let (tx, mut subscription) = subscription_with_capacity(8);
+
+        // Poll `recv()` on a spawned task so the test can let it park in
+        // `receiver.recv().await` before the channel closes. The 50 ms
+        // sleep gives the runtime time to poll the spawned future once
+        // (parking it on the empty channel) before we drop the last
+        // `Sender`. The assertion holds whether the drop races the first
+        // poll or lands truly in the parked window — both end states
+        // observe `RecvError::Closed` → `TransportClosed`.
+        let recv = tokio::spawn(async move { subscription.recv().await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Drop the last Sender — the channel closes from the receiver's
+        // side, mirroring the read loop's EOF path taking the
+        // client-owned `Sender` (the producer's inner becomes `None`).
+        drop(tx);
+
+        match tokio::time::timeout(Duration::from_secs(2), recv).await {
+            Ok(Ok(Err(Error::TransportClosed(message)))) => {
+                assert!(
+                    message.contains("DeepSeek Harness runtime closed"),
+                    "the closed reason rides in the diagnostics: {message}"
+                );
+            }
+            Ok(Ok(Ok(notification))) => {
+                panic!("recv returned a notification after the channel closed: {notification:?}");
+            }
+            Ok(Ok(Err(other))) => {
+                panic!("recv returned an unexpected error after the channel closed: {other:?}");
+            }
+            Ok(Err(_join_err)) => {
+                panic!("the spawned recv task panicked after the channel closed");
+            }
+            Err(_elapsed) => {
+                panic!("recv hung after the channel closed — the parked-recv path is broken");
+            }
+        }
     }
 }

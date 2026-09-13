@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use deepseek_harness_sdk::{
-    ClientTimeouts, Config, ContentBlock, DeepSeekHarness, Error, HarnessClient, LaunchSpec,
+    ClientTimeouts, Config, ContentBlock, DeepSeekHarness, Error, HarnessClient, Input, LaunchSpec,
 };
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -762,4 +762,220 @@ impl Drop for ForbiddenEnvGuard {
             std::env::remove_var(key);
         }
     }
+}
+
+// --- parked-recv / Session::run mid-turn-death regression tests -------------
+//
+// Three tests guarding the doc contract that `recv()` (and therefore
+// `Session::run`) returns `Error::TransportClosed` once the channel or the
+// client is closed, even when a `recv()` is already parked in
+// `broadcast::Receiver::recv().await` at the moment of runtime death.
+// Regression for the hang introduced in 218b0b3, where the original
+// broadcast `Sender` was retained on `HarnessClient` for its lifetime, so a
+// spontaneous death (stdout EOF without `close()`) left the channel open
+// and a parked `recv()` parked forever.
+
+/// A single `recv()` future, parked across the death boundary, must return
+/// `TransportClosed` promptly once the runtime dies mid-turn — not hang.
+///
+/// The script accepts `session/prompt`, sleeps briefly so the client's
+/// `recv()` has time to park in `broadcast::Receiver::recv().await`, then
+/// exits 0 (stdout EOF). The read loop's EOF path drops the client-owned
+/// `Sender` (mirroring `close()`), the channel closes, and the parked
+/// `recv()` resolves with `RecvError::Closed` → `TransportClosed`.
+/// Asserted with a 2 s bound so a regression to the hang reports as a
+/// `timeout` failure instead of stalling the suite.
+#[tokio::test]
+async fn parked_recv_after_runtime_death_returns_closed() {
+    let mut rt = FakeRuntime::spawn(&[
+        expect("session/prompt"),
+        respond(json!({"messageId": "m-1"})),
+        // Long enough for the client to park in recv(); short enough to
+        // bound the test (the deadline below is 2 s).
+        sleep_ms(300),
+        // stdout EOF closes here; the read loop's EOF path drops the
+        // client-owned broadcast Sender.
+        exit(0),
+    ])
+    .expect("spawn fake runtime");
+
+    let mut subscription = rt.client.subscribe_session_tree(ROOT_SESSION);
+    let message_id = rt
+        .client
+        .session_prompt(ROOT_SESSION, vec![ContentBlock::Text { text: "hi".into() }])
+        .await
+        .expect("session/prompt succeeds");
+    assert_eq!(message_id, "m-1");
+
+    let started = std::time::Instant::now();
+    let outcome = tokio::time::timeout(Duration::from_secs(2), subscription.recv()).await;
+    let elapsed = started.elapsed();
+
+    match outcome {
+        Ok(Err(Error::TransportClosed(message))) => {
+            assert!(
+                elapsed < Duration::from_secs(2),
+                "recv should resolve on its own once the runtime dies, not via the outer timeout"
+            );
+            assert!(
+                message.contains("DeepSeek Harness runtime closed"),
+                "the closed reason rides in the diagnostics: {message}"
+            );
+            // The exit code is the best-effort poll the read loop performs
+            // on EOF (the peer exited 0); seeing it proves the EOF-path
+            // diagnostics land in the parked-recv error.
+            assert!(
+                message.contains("exit code: 0"),
+                "the EOF-path exit code must reach the parked recv: {message}"
+            );
+        }
+        Ok(Ok(notification)) => {
+            panic!("recv returned a notification after runtime death: {notification:?}");
+        }
+        Ok(Err(other)) => {
+            panic!("recv returned an unexpected error after runtime death: {other:?}");
+        }
+        Err(_elapsed) => {
+            panic!(
+                "recv hung for 2 s after runtime death — the parked-recv-on-death bug is back \
+                 (elapsed = {elapsed:?}); see `NotificationSubscription::recv` and the \
+                 read-loop EOF path"
+            );
+        }
+    }
+
+    rt.client.close().await.expect("close reaps the dead peer");
+}
+
+/// A *fresh* `recv()` entered after runtime death returns `TransportClosed`
+/// immediately. Control test for the diagnostic-flag half of the doc
+/// contract: it re-enters the top-of-loop `state.closed` check on every
+/// call, so this path was honored even with the bug. It must keep passing
+/// after the fix (which additionally wakes a *parked* `recv()` via channel
+/// closure). The peer sleeps briefly so the client observes `TransportClosed`
+/// by re-entering `recv()`, not by racing the process in-flight.
+#[tokio::test]
+async fn fresh_recv_after_runtime_death_returns_closed() {
+    let mut rt = FakeRuntime::spawn(&[
+        expect("session/prompt"),
+        respond(json!({"messageId": "m-1"})),
+        sleep_ms(200),
+        exit(0),
+    ])
+    .expect("spawn fake runtime");
+
+    let mut subscription = rt.client.subscribe_session_tree(ROOT_SESSION);
+    let _message_id = rt
+        .client
+        .session_prompt(ROOT_SESSION, vec![ContentBlock::Text { text: "hi".into() }])
+        .await
+        .expect("session/prompt succeeds");
+
+    // Poll `recv()` in short bursts: each iteration creates a *fresh*
+    // future, re-entering the top-of-loop `state.closed` check. After the
+    // peer dies, a fresh `recv()` returns `TransportClosed` immediately.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match tokio::time::timeout(Duration::from_millis(50), subscription.recv()).await {
+            Ok(Err(Error::TransportClosed(message))) => {
+                eprintln!("CORRECT: fresh recv after death returned TransportClosed: {message}");
+                break;
+            }
+            Ok(Ok(notification)) => {
+                panic!(
+                    "fresh recv returned a notification after the runtime had died: \
+                     {notification:?}"
+                );
+            }
+            Ok(Err(other)) => {
+                panic!("fresh recv returned an unexpected error after death: {other:?}");
+            }
+            Err(_elapsed) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "fresh recv never reported death within the deadline; the read loop may \
+                     not have set state.closed on EOF"
+                );
+                // 50 ms burst: a fresh recv will re-check state.closed next
+                // iteration.
+                continue;
+            }
+        }
+    }
+
+    rt.client.close().await.expect("close reaps the dead peer");
+}
+
+/// End-to-end: `Session::run` surfaces `TransportClosed` instead of wedging
+/// when the runtime dies mid-turn (after `session/prompt` succeeds but
+/// before the inbox receipt / root idle arrives). The high-level API's
+/// Phase 1 / Phase 2 waits park in `subscription.recv().await` (documented
+/// unbounded); the fix lets the parked `recv()` resolve via the channel
+/// closing so `Session::run` propagates `TransportClosed`.
+#[tokio::test]
+async fn session_run_surfaces_transport_closed_on_mid_turn_death() {
+    let config = harness_config(&[
+        expect_params(
+            "initialize",
+            json!({"provider": "deepseek-official", "model": "deepseek-v4-flash"}),
+        ),
+        respond(server_info_result()),
+        expect("session/prompt"),
+        respond(json!({"messageId": "m-1"})),
+        // The peer dies *after* `session/prompt` acknowledges and *before*
+        // any notification is emitted — Phase 1 has parked in recv().
+        sleep_ms(300),
+        // stdout EOF closes here.
+        exit(0),
+    ])
+    .expect("serialize script");
+
+    // Bound the `Session::run` call so a regression to the hang fails
+    // loudly as a timeout instead of stalling the suite. (Production code
+    // does NOT wrap — `run` is documented unbounded; this outer bound is
+    // test-only.)
+    let mut harness = DeepSeekHarness::start(config)
+        .await
+        .expect("harness starts and completes the handshake");
+    let session = harness.start_session(Some(ROOT_SESSION.to_string()));
+
+    let started = std::time::Instant::now();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(2),
+        session.run(Input::Text("hello".to_string()), None),
+    )
+    .await;
+    let elapsed = started.elapsed();
+
+    match outcome {
+        Ok(Err(Error::TransportClosed(message))) => {
+            assert!(
+                elapsed < Duration::from_secs(2),
+                "Session::run should surface the death on its own, not via the outer timeout"
+            );
+            assert!(
+                message.contains("DeepSeek Harness runtime closed"),
+                "the closed reason must ride in the diagnostics: {message}"
+            );
+            assert!(
+                message.contains("exit code: 0"),
+                "the EOF-path exit code must reach Session::run: {message}"
+            );
+        }
+        Ok(Ok(result)) => {
+            panic!("Session::run returned a result after runtime death: {result:?}");
+        }
+        Ok(Err(other)) => {
+            panic!("Session::run returned an unexpected error after death: {other:?}");
+        }
+        Err(_elapsed) => {
+            panic!(
+                "Session::run hung for 2 s after runtime death — the mid-turn-death wedge \
+                 is back (elapsed = {elapsed:?}); see the parked recv in Phase 1/2 and the \
+                 read-loop EOF path"
+            );
+        }
+    }
+
+    harness.close().await.expect("close reaps the dead peer");
 }
