@@ -13,7 +13,7 @@ One file per user-visible change group; slug filename ending `.md`:
 ---
 category: Added
 ---
-- New crate consumer API: `Config::runtime_bin` override.
+- New crate consumer API: `Config::dsh_bin` override.
 - Acquisition hints when the runtime is missing.
 ````
 
