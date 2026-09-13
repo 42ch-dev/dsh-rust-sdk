@@ -68,7 +68,7 @@ Every one of the three traps produces a client that **compiles, passes surface-l
 ## When to Apply
 
 - New protocol methods or notification types: extend `src/protocol.rs` with Unknown-tolerant parsing; never `deny_unknown_fields` (wire spec §5.2).
-- Runtime-bin companion crate (deferred item `runtime-bin-delivery`): platform matrix is linux-x64 / linux-arm64 / macos-arm64 (CI publishes exactly these three; macOS needs the sibling `-spawn-helper`).
+- Runtime-bin companion crate (deferred item `runtime-bin-delivery`): platform matrix follows the upstream published wheel matrix (which now includes Windows x64; macOS needs the sibling `-spawn-helper`) — see the README's `Platform support & MSRV` for the current list.
 - Protocol bumps (`serverInfo.version` leaving 0.0.1): revisit the strict-name check and the no-negotiation stance together (wire spec §7.4).
 
 ## Examples
