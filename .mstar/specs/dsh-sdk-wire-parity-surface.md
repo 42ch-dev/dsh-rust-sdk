@@ -140,7 +140,7 @@ Evidence: `python/sdk/src/deepseek_harness/api.py:40-46`; `packages/sdk/client/s
 
 Derivation algorithms MUST match Python exactly:
 
-- `final_response` — last root `assistant/message`, pointer walk `data.message.content` else `data.content`; a non-string `text` contributes `""`; no fallback to an earlier event (`python/sdk/src/deepseek_harness/api.py:211-228`).
+- `final_response` — reversed scan for the last root `assistant/message` whose `data` is an object and whose resolved `content` (`data.message.content` when `data.message` is an object, else `data.content`) is an array; a malformed last `assistant/message` (non-object `data` or non-array `content`) is skipped via `continue` and the scan falls back to the next earlier `assistant/message` (Python `continue` inside `reversed()`, `python/sdk/src/deepseek_harness/api.py:211-228`); a non-string `text` contributes `""`; `""` when no usable `assistant/message` exists.
 - `finish_reason` — last root `turn/end`'s `data.reason.kind` inside the activity interval; no `turn/end` → `None`; a malformed last `turn/end` → protocol error with the exact message `turn/end event requires a string data.reason.kind`; malformedness is checked only on the last one (reversed scan) (`python/sdk/src/deepseek_harness/api.py:231-248`).
 - The runtime's `turn/end` reason vocabulary is six kinds — `completed`, `aborted`, `blocked`, `error`, `max-tokens`, `interrupted` (`packages/core/session/src/types.ts:198-222`) — and MUST stay a string, not a closed enum.
 

@@ -415,17 +415,21 @@ async fn last_assistant_message_with_only_null_text_blocks_yields_empty_response
     let mut script = run_prefix("msg-9");
     script.extend([
         emit("session.event", root_event(receipt_event("msg-9"))),
-        // An earlier assistant/message must not win the pointer walk.
+        // An earlier assistant/message with real text. It must not win: the
+        // last assistant/message's content is a *list* (a usable message), so
+        // the reversed scan stops at the last one — its null-text block is
+        // what contributes, not the earlier message's text.
         emit(
             "session.event",
             root_event(assistant_event(
                 json!([{"type": "text", "text": "stale-output"}]),
             )),
         ),
-        // The last assistant/message has a single text block with
-        // `text: null` — the discriminating case for the literal
-        // "text: null contributes `""`" constraint (a null-only last message
-        // must yield an empty response, not fall back to the earlier text).
+        // The last assistant/message has a valid list `content` with a single
+        // text block whose `text` is null — the discriminating case for the
+        // literal "text: null contributes `""`" constraint. Because the
+        // content IS a list, the malformed-last fallback does not fire; the
+        // last usable message is this one, and its null text yields "".
         emit(
             "session.event",
             root_event(assistant_event(json!([{"type": "text", "text": null}]))),
@@ -438,9 +442,82 @@ async fn last_assistant_message_with_only_null_text_blocks_yields_empty_response
 
     assert_eq!(
         result.final_response, "",
-        "`text: null` contributes \"\" — the last message's only text block \
-         is null, so the response must be empty (no fallback to the earlier \
-         assistant/message)"
+        "`text: null` contributes \"\" — the last message's content is a \
+         list (usable), so it is the message the scan stops at; its only \
+         text block is null and yields \"\" (the earlier text does not win)"
+    );
+    assert_eq!(result.finish_reason.as_deref(), Some("completed"));
+}
+
+#[tokio::test]
+async fn final_response_falls_back_to_earlier_message_when_last_is_malformed() {
+    // Python parity (spec §6.2): the reversed scan skips a malformed *last*
+    // `assistant/message` (non-object `data` or non-array `content`) and
+    // falls back to the next earlier one. This is the discriminating case the
+    // prior no-fallback implementation got wrong — it returned "" here. The
+    // last message has `content: null` (not an array), so Python fallback #2
+    // fires and the earlier real output is returned.
+    let mut script = run_prefix("msg-fb");
+    script.extend([
+        emit("session.event", root_event(receipt_event("msg-fb"))),
+        emit(
+            "session.event",
+            root_event(assistant_event(
+                json!([{"type": "text", "text": "earlier real output"}]),
+            )),
+        ),
+        // The last assistant/message is malformed: `data.message.content` is
+        // null, not an array. A conformant runtime never emits this, but the
+        // derivation algorithm must still match Python and fall back.
+        emit(
+            "session.event",
+            root_event(assistant_event(serde_json::Value::Null)),
+        ),
+        emit("session.event", root_event(turn_end("completed"))),
+        emit("session.status", idle(ROOT_SESSION)),
+        exit(0),
+    ]);
+    let result = run_once(&script, "hello").await.expect("run succeeds");
+
+    assert_eq!(
+        result.final_response, "earlier real output",
+        "a malformed last assistant/message must fall back to the earlier \
+         usable one (Python `continue` inside `reversed()`), not return \"\""
+    );
+    assert_eq!(result.finish_reason.as_deref(), Some("completed"));
+}
+
+#[tokio::test]
+async fn final_response_falls_back_when_last_assistant_message_data_is_not_an_object() {
+    // Python fallback #1: the last `assistant/message` has a non-object
+    // `data` (here null). The reversed scan skips it and falls back to the
+    // earlier usable message. The envelope (the `session.event` payload) is
+    // well-formed — only the inner `data` is malformed — so the run does not
+    // fail at collection time (envelope shape is the strict-gate boundary,
+    // spec §7.3); the derivation algorithm handles the inner malformation.
+    let mut script = run_prefix("msg-fb-data");
+    script.extend([
+        emit("session.event", root_event(receipt_event("msg-fb-data"))),
+        emit(
+            "session.event",
+            root_event(assistant_event(
+                json!([{"type": "text", "text": "earlier real output"}]),
+            )),
+        ),
+        emit(
+            "session.event",
+            root_event(json!({"type": "assistant/message", "data": null})),
+        ),
+        emit("session.event", root_event(turn_end("completed"))),
+        emit("session.status", idle(ROOT_SESSION)),
+        exit(0),
+    ]);
+    let result = run_once(&script, "hello").await.expect("run succeeds");
+
+    assert_eq!(
+        result.final_response, "earlier real output",
+        "a last assistant/message with non-object data must fall back to the \
+         earlier usable one (Python fallback #1)"
     );
     assert_eq!(result.finish_reason.as_deref(), Some("completed"));
 }
