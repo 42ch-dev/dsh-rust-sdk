@@ -213,13 +213,14 @@ impl HarnessClient {
         let state = Arc::new(Mutex::new(SharedState::default()));
         let (notifications, _) = broadcast::channel(broadcast_capacity.max(1));
         // The original `Sender` lives inside a shared `NotificationsProducer`
-        // (an `Arc<Mutex<Option<Sender>>>`) so the read loop's EOF path and
-        // `close()`'s teardown can both drop it by setting the inner to
-        // `None`. This closes the broadcast channel: a `recv()` parked in
-        // `Receiver::recv().await` then resolves with `RecvError::Closed` →
+        // (an `Arc<Mutex<Option<Sender>>>`) so every teardown path — the read
+        // loop's EOF tail, `close()`, and `Drop` — can drop it by setting the
+        // inner to `None`. This closes the broadcast channel: a `recv()` parked
+        // in `Receiver::recv().await` then resolves with `RecvError::Closed` →
         // `Error::TransportClosed` (the documented contract). The read loop
-        // receives a clone of the `Arc`; subscriptions clone the `Sender` for
-        // a `Receiver` under the mutex.
+        // receives a clone of the `Arc`; subscriptions only *subscribe* to the
+        // shared `Sender` (under the mutex) and keep the resulting `Receiver`,
+        // never a `Sender` — so no subscription can hold the channel open.
         let notifications: NotificationsProducer = Arc::new(Mutex::new(Some(notifications)));
 
         let stdin_shared = Arc::new(tokio::sync::Mutex::new(stdin));
@@ -506,8 +507,9 @@ impl HarnessClient {
     /// [`NotificationSubscription::recv`] rejects immediately with
     /// [`Error::TransportClosed`]. The producer is shared with the read loop
     /// (see [`NotificationsProducer`](super::NotificationsProducer)), so
-    /// once the EOF path or `close()` has dropped the `Sender`, the
-    /// `Option` is `None` and a fresh subscription gets no `Receiver`.
+    /// once the EOF path, `close()`, or `HarnessClient::drop` has dropped the
+    /// `Sender`, the `Option` is `None` and a fresh subscription gets no
+    /// `Receiver`.
     pub fn subscribe_session_tree(&self, root: &str) -> NotificationSubscription {
         NotificationSubscription {
             receiver: lock(&self.notifications)
@@ -529,7 +531,8 @@ mod tests {
     /// Build a `HarnessClient` skeleton carrying only the fields
     /// `subscribe_session_tree` consults (the producer, parent map, and
     /// state). The task / child / stdin handles are `None`, so dropping the
-    /// client runs the no-op tail of `Drop` (no background tasks to abort).
+    /// client aborts no background tasks — but the `Drop` tail still takes the
+    /// notification producer.
     fn client_with_notifications(notifications: NotificationsProducer) -> HarnessClient {
         HarnessClient {
             child: None,
@@ -579,6 +582,48 @@ mod tests {
                 );
             }
             other => panic!("expected TransportClosed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn drop_without_close_takes_the_producer_and_wakes_a_parked_subscription() {
+        // `Drop` takes the notification producer, so a subscription held
+        // across a drop-without-close wakes with `TransportClosed`
+        // deterministically instead of whenever the aborted read task happens
+        // to be dropped. Without the take the channel would stay open — a
+        // `Receiver` alone never closes it — and the parked `recv()` would
+        // hang.
+        let (tx, _rx) = broadcast::channel::<Notification>(4);
+        let notifications: NotificationsProducer = Arc::new(Mutex::new(Some(tx)));
+        let client = client_with_notifications(Arc::clone(&notifications));
+        let mut subscription = client.subscribe_session_tree("root");
+
+        // Park `recv()` on a spawned task so the drop lands while it waits.
+        let parked = tokio::spawn(async move { subscription.recv().await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !parked.is_finished(),
+            "the receiver must still be parked when the client is dropped"
+        );
+
+        drop(client);
+
+        assert!(
+            lock(&notifications).is_none(),
+            "Drop must take the producer so the broadcast channel closes"
+        );
+        match tokio::time::timeout(Duration::from_secs(2), parked).await {
+            // The variant is the contract; the message text is a constant this
+            // path sets, so it is not asserted.
+            Ok(Ok(Err(Error::TransportClosed(_)))) => {}
+            Ok(Ok(Ok(notification))) => {
+                panic!("a parked recv delivered a notification: {notification:?}");
+            }
+            Ok(Ok(Err(other))) => panic!("expected TransportClosed, got {other:?}"),
+            Ok(Err(join_err)) => panic!("the parked recv task failed: {join_err}"),
+            Err(_elapsed) => {
+                panic!("the parked recv never woke after the client was dropped");
+            }
         }
     }
 }

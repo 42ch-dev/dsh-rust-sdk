@@ -231,15 +231,19 @@ mod tests {
         );
     }
 
-    /// Regression for the parked-`recv` half of the EOF-death fix. When the
-    /// last broadcast `Sender` is dropped, the broadcast channel closes and
-    /// a parked `receiver.recv().await` resolves with `RecvError::Closed`,
-    /// which `recv()` surfaces as `Error::TransportClosed` with the
-    /// documented closed reason. The read loop's EOF path now triggers
-    /// exactly this path by taking the client-owned `Sender` via the
-    /// shared `NotificationsProducer`; parked-then-dropped is the
-    /// observation the bug used to miss. If this regresses, the outer
-    /// 2 s `tokio::time::timeout` fires and the test fails loudly.
+    /// Pins the receiver-side mechanism of the EOF-death fix: when the last
+    /// broadcast `Sender` is dropped, the channel closes and a parked
+    /// `receiver.recv().await` resolves with `RecvError::Closed`, which
+    /// `recv()` surfaces as `Error::TransportClosed` with the documented
+    /// closed reason.
+    ///
+    /// This test owns its channel and drops its own `Sender`, so it exercises
+    /// the receiver side only: the paths that drop the *client-owned*
+    /// `Sender` — the read loop's EOF tail, `close()`, and
+    /// `HarnessClient::drop` — are covered end-to-end in
+    /// `tests/client_lifecycle.rs::parked_recv_after_runtime_death_returns_closed`
+    /// and in the `client::core` unit tests. If this regresses, the outer 2 s
+    /// `tokio::time::timeout` fires and the test fails loudly.
     #[tokio::test]
     async fn recv_returns_transport_closed_when_channel_closes_while_recv_is_parked() {
         let (tx, mut subscription) = subscription_with_capacity(8);

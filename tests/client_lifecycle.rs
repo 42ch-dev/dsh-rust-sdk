@@ -20,8 +20,8 @@ use uuid::Uuid;
 use common::fake_runtime::{
     emit, emit_blank, emit_raw, emit_stderr, env_dump_bin, exit, expect, expect_frame,
     expect_params, fake_runtime_path, fake_runtime_spec, harness_config, ignore_all, respond,
-    respond_error, server_info_result, sleep_forever_bin, sleep_ms, test_temp_root, test_timeouts,
-    FakeRuntime,
+    respond_error, run_prefix, server_info_result, sleep_forever_bin, sleep_ms, test_temp_root,
+    test_timeouts, FakeRuntime,
 };
 
 /// The canonical client-side session ids used across scenarios.
@@ -766,10 +766,14 @@ impl Drop for ForbiddenEnvGuard {
 
 // --- parked-recv / Session::run mid-turn-death regression tests -------------
 //
-// Three tests guarding the doc contract that `recv()` (and therefore
+// Four tests guarding the doc contract that `recv()` (and therefore
 // `Session::run`) returns `Error::TransportClosed` once the channel or the
 // client is closed, even when a `recv()` is already parked in
-// `broadcast::Receiver::recv().await` at the moment of runtime death.
+// `broadcast::Receiver::recv().await` at the moment of runtime death:
+// `parked_recv_*`, the `fresh_recv_*` control, `session_run_*`, and
+// `post_death_close_*` (the post-death teardown contracts — a second
+// `close()` is a no-op, a subscription created after the death is
+// born-failed — which rest on the same channel closure).
 // Regression for the hang introduced in 218b0b3, where the original
 // broadcast `Sender` was retained on `HarnessClient` for its lifetime, so a
 // spontaneous death (stdout EOF without `close()`) left the channel open
@@ -778,21 +782,26 @@ impl Drop for ForbiddenEnvGuard {
 /// A single `recv()` future, parked across the death boundary, must return
 /// `TransportClosed` promptly once the runtime dies mid-turn — not hang.
 ///
-/// The script accepts `session/prompt`, sleeps briefly so the client's
-/// `recv()` has time to park in `broadcast::Receiver::recv().await`, then
-/// exits 0 (stdout EOF). The read loop's EOF path drops the client-owned
-/// `Sender` (mirroring `close()`), the channel closes, and the parked
-/// `recv()` resolves with `RecvError::Closed` → `TransportClosed`.
-/// Asserted with a 2 s bound so a regression to the hang reports as a
-/// `timeout` failure instead of stalling the suite.
+/// The script accepts `session/prompt`, sleeps for the file's 1 s park
+/// convention so the client's `recv()` is parked in
+/// `broadcast::Receiver::recv().await` when the peer writes its last words and
+/// exits (stdout EOF). The read loop's EOF path drains stderr and then drops
+/// the client-owned `Sender` (mirroring `close()`), the channel closes, and
+/// the parked `recv()` resolves with `RecvError::Closed` → `TransportClosed`
+/// carrying the captured stderr tail. The 5 s outer bound keeps a regression
+/// to the hang loud (a `timeout` failure) with ample headroom over the park.
 #[tokio::test]
 async fn parked_recv_after_runtime_death_returns_closed() {
     let mut rt = FakeRuntime::spawn(&[
         expect("session/prompt"),
         respond(json!({"messageId": "m-1"})),
-        // Long enough for the client to park in recv(); short enough to
-        // bound the test (the deadline below is 2 s).
-        sleep_ms(300),
+        // Long enough for the client to park in recv() (the 1 s park
+        // convention used above); short enough to bound the test (the
+        // deadline below is 5 s).
+        sleep_ms(1000),
+        // The runtime's last words: the stderr task captures them and the
+        // EOF path embeds the tail in the closed error.
+        emit_stderr("fatal: runtime panicked"),
         // stdout EOF closes here; the read loop's EOF path drops the
         // client-owned broadcast Sender.
         exit(0),
@@ -808,25 +817,27 @@ async fn parked_recv_after_runtime_death_returns_closed() {
     assert_eq!(message_id, "m-1");
 
     let started = std::time::Instant::now();
-    let outcome = tokio::time::timeout(Duration::from_secs(2), subscription.recv()).await;
+    let outcome = tokio::time::timeout(Duration::from_secs(5), subscription.recv()).await;
     let elapsed = started.elapsed();
 
     match outcome {
         Ok(Err(Error::TransportClosed(message))) => {
-            assert!(
-                elapsed < Duration::from_secs(2),
-                "recv should resolve on its own once the runtime dies, not via the outer timeout"
-            );
+            // Every closed path builds its error from the same constant
+            // reason, so the reason is guaranteed here. The stderr tail is
+            // guaranteed too, because the read loop drains stderr (bounded)
+            // *before* the producer take — the ordering that lets the parked
+            // `recv()` wake with the diagnostics. The exit code is
+            // deliberately NOT asserted: it comes from the read loop's single
+            // best-effort poll of the child, which may find it not yet reaped
+            // or the lock held, so a healthy build legitimately omits
+            // `exit code:` from this message.
             assert!(
                 message.contains("DeepSeek Harness runtime closed"),
-                "the closed reason rides in the diagnostics: {message}"
+                "the closed reason must reach the parked recv: {message}"
             );
-            // The exit code is the best-effort poll the read loop performs
-            // on EOF (the peer exited 0); seeing it proves the EOF-path
-            // diagnostics land in the parked-recv error.
             assert!(
-                message.contains("exit code: 0"),
-                "the EOF-path exit code must reach the parked recv: {message}"
+                message.contains("fatal: runtime panicked"),
+                "the EOF-path stderr tail must reach the parked recv: {message}"
             );
         }
         Ok(Ok(notification)) => {
@@ -837,7 +848,7 @@ async fn parked_recv_after_runtime_death_returns_closed() {
         }
         Err(_elapsed) => {
             panic!(
-                "recv hung for 2 s after runtime death — the parked-recv-on-death bug is back \
+                "recv hung for 5 s after runtime death — the parked-recv-on-death bug is back \
                  (elapsed = {elapsed:?}); see `NotificationSubscription::recv` and the \
                  read-loop EOF path"
             );
@@ -877,10 +888,7 @@ async fn fresh_recv_after_runtime_death_returns_closed() {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
         match tokio::time::timeout(Duration::from_millis(50), subscription.recv()).await {
-            Ok(Err(Error::TransportClosed(message))) => {
-                eprintln!("CORRECT: fresh recv after death returned TransportClosed: {message}");
-                break;
-            }
+            Ok(Err(Error::TransportClosed(_))) => break,
             Ok(Ok(notification)) => {
                 panic!(
                     "fresh recv returned a notification after the runtime had died: \
@@ -911,24 +919,28 @@ async fn fresh_recv_after_runtime_death_returns_closed() {
 /// before the inbox receipt / root idle arrives). The high-level API's
 /// Phase 1 / Phase 2 waits park in `subscription.recv().await` (documented
 /// unbounded); the fix lets the parked `recv()` resolve via the channel
-/// closing so `Session::run` propagates `TransportClosed`.
+/// closing so `Session::run` propagates `TransportClosed` with the captured
+/// stderr tail. The exit code is deliberately NOT asserted — it comes from
+/// the same best-effort child poll the parked-recv test documents, so a
+/// healthy build may legitimately omit it.
 #[tokio::test]
 async fn session_run_surfaces_transport_closed_on_mid_turn_death() {
-    let config = harness_config(&[
-        expect_params(
-            "initialize",
-            json!({"provider": "deepseek-official", "model": "deepseek-v4-flash"}),
-        ),
-        respond(server_info_result()),
-        expect("session/prompt"),
-        respond(json!({"messageId": "m-1"})),
+    // The parity handshake comes from the shared helper (the pinned
+    // provider/model defaults live there and nowhere else).
+    let mut script = run_prefix("m-1");
+    script.extend([
         // The peer dies *after* `session/prompt` acknowledges and *before*
-        // any notification is emitted — Phase 1 has parked in recv().
-        sleep_ms(300),
+        // any notification is emitted — Phase 1 has parked in recv() (the
+        // file's 1 s park convention); short enough to bound the test (the
+        // deadline below is 5 s).
+        sleep_ms(1000),
+        // The runtime's last words: the stderr task captures them and the
+        // EOF path embeds the tail in the closed error.
+        emit_stderr("fatal: runtime panicked"),
         // stdout EOF closes here.
         exit(0),
-    ])
-    .expect("serialize script");
+    ]);
+    let config = harness_config(&script).expect("serialize script");
 
     // Bound the `Session::run` call so a regression to the hang fails
     // loudly as a timeout instead of stalling the suite. (Production code
@@ -941,7 +953,7 @@ async fn session_run_surfaces_transport_closed_on_mid_turn_death() {
 
     let started = std::time::Instant::now();
     let outcome = tokio::time::timeout(
-        Duration::from_secs(2),
+        Duration::from_secs(5),
         session.run(Input::Text("hello".to_string()), None),
     )
     .await;
@@ -949,17 +961,18 @@ async fn session_run_surfaces_transport_closed_on_mid_turn_death() {
 
     match outcome {
         Ok(Err(Error::TransportClosed(message))) => {
-            assert!(
-                elapsed < Duration::from_secs(2),
-                "Session::run should surface the death on its own, not via the outer timeout"
-            );
+            // Same guarantees as the parked-recv test: the reason riding
+            // every closed error is the shared constant, and the read loop
+            // drains stderr (bounded) *before* the producer take, so the tail
+            // the EOF path captured reaches the error `Session::run`
+            // surfaces.
             assert!(
                 message.contains("DeepSeek Harness runtime closed"),
-                "the closed reason must ride in the diagnostics: {message}"
+                "the closed reason must reach Session::run: {message}"
             );
             assert!(
-                message.contains("exit code: 0"),
-                "the EOF-path exit code must reach Session::run: {message}"
+                message.contains("fatal: runtime panicked"),
+                "the EOF-path stderr tail must reach Session::run: {message}"
             );
         }
         Ok(Ok(result)) => {
@@ -970,7 +983,7 @@ async fn session_run_surfaces_transport_closed_on_mid_turn_death() {
         }
         Err(_elapsed) => {
             panic!(
-                "Session::run hung for 2 s after runtime death — the mid-turn-death wedge \
+                "Session::run hung for 5 s after runtime death — the mid-turn-death wedge \
                  is back (elapsed = {elapsed:?}); see the parked recv in Phase 1/2 and the \
                  read-loop EOF path"
             );
@@ -978,4 +991,76 @@ async fn session_run_surfaces_transport_closed_on_mid_turn_death() {
     }
 
     harness.close().await.expect("close reaps the dead peer");
+}
+
+/// Post-death teardown through the public API, with no `close()` in between:
+/// after a spontaneous stdout EOF the read loop owns the teardown, so a
+/// subscription created *after* the death is born-failed (`recv()` returns
+/// `TransportClosed` immediately instead of parking), and `close()` still
+/// reaps cleanly — twice, since a second `close()` is a documented no-op
+/// returning `Ok(())`.
+///
+/// This is the end-to-end guard for contracts the hand-built client
+/// skeletons in `src/client/core.rs` can only approximate: the read loop's
+/// producer take on the EOF path is what makes both hold.
+#[tokio::test]
+async fn post_death_close_is_a_noop_and_subscriptions_are_born_failed() {
+    let mut rt = FakeRuntime::spawn(&[
+        expect("session/prompt"),
+        respond(json!({"messageId": "m-1"})),
+        // Long enough for the client to park in recv() (the file's 1 s park
+        // convention).
+        sleep_ms(1000),
+        // stdout EOF closes here.
+        exit(0),
+    ])
+    .expect("spawn fake runtime");
+
+    let message_id = rt
+        .client
+        .session_prompt(ROOT_SESSION, vec![ContentBlock::Text { text: "hi".into() }])
+        .await
+        .expect("session/prompt succeeds");
+    assert_eq!(message_id, "m-1");
+
+    // Wait for the read loop's EOF tail before asserting on its effects: a
+    // fresh `recv()` re-checks `state.closed` at the top of every call, so
+    // polling it until it reports the death is what makes the post-death
+    // assertions deterministic (the peer is dead either way — this just stops
+    // racing the tail).
+    let mut subscription = rt.client.subscribe_session_tree(ROOT_SESSION);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match tokio::time::timeout(Duration::from_millis(50), subscription.recv()).await {
+            Ok(Err(Error::TransportClosed(_))) => break,
+            Ok(Ok(notification)) => {
+                panic!("a notification arrived after the runtime had died: {notification:?}");
+            }
+            Ok(Err(other)) => panic!("unexpected error after the runtime died: {other:?}"),
+            Err(_elapsed) => assert!(
+                std::time::Instant::now() < deadline,
+                "the read loop never reported the runtime death on EOF"
+            ),
+        }
+    }
+
+    // Born-failed: the EOF tail took the producer, so a subscription created
+    // now carries no receiver and must reject instead of parking.
+    let mut after_death = rt.client.subscribe_session_tree(ROOT_SESSION);
+    match tokio::time::timeout(Duration::from_secs(5), after_death.recv()).await {
+        // `TransportClosed` is the whole contract here; the message text is a
+        // constant the client sets on this path, so it is not asserted.
+        Ok(Err(Error::TransportClosed(_))) => {}
+        Ok(Ok(notification)) => {
+            panic!("a born-failed subscription delivered a notification: {notification:?}");
+        }
+        Ok(Err(other)) => panic!("a born-failed subscription must reject, got {other:?}"),
+        Err(_elapsed) => panic!("a born-failed subscription must not park in recv()"),
+    }
+
+    // Death without `close()` leaves the client in a consistent terminal
+    // state: the first `close()` reaps the already-dead peer, and a second
+    // one is a no-op.
+    rt.client.close().await.expect("close reaps the dead peer");
+    rt.client.close().await.expect("a second close is a no-op");
 }
