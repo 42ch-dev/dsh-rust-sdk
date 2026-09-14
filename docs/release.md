@@ -46,7 +46,7 @@ Every user-visible change ships one fragment file under `.changes/unreleased/`:
 ---
 category: Added
 ---
-- New crate consumer API: `Config::runtime_bin` override.
+- New crate consumer API: `Config::dsh_bin` override.
 - Acquisition hints when the runtime is missing.
 ````
 
