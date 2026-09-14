@@ -106,9 +106,14 @@ impl HarnessClient {
             }
         }
 
-        // Drop the notification producer: existing subscriptions drain their
-        // queues and then see the channel close.
-        self.notifications = None;
+        // Drop the notification producer (set the shared inner to `None`):
+        // existing subscriptions drain their queues and then see the channel
+        // close, and any `recv()` parked in `Receiver::recv().await` resolves
+        // with `RecvError::Closed` → `Error::TransportClosed`. The read
+        // loop's EOF path does the same `Option::take` on spontaneous runtime
+        // death (no `close()`); the second `take` here is a no-op in that
+        // case, so a close-after-death sequence is safe.
+        *lock(&self.notifications) = None;
     }
 
     /// Run the exit-wait ladder: stdin-EOF grace, then SIGTERM, then SIGKILL.
@@ -353,7 +358,7 @@ mod tests {
             pending: Arc::new(Mutex::new(HashMap::new())),
             parent_map: Arc::new(Mutex::new(ParentMap::new())),
             state: Arc::new(Mutex::new(SharedState::default())),
-            notifications: None,
+            notifications: Arc::new(Mutex::new(None)),
             read_task: Some(task),
             stderr_task: None,
             timeouts: ClientTimeouts::default(),
@@ -391,7 +396,7 @@ mod tests {
             pending: Arc::clone(&pending),
             parent_map,
             state,
-            notifications: Some(notifications),
+            notifications: Arc::new(Mutex::new(Some(notifications))),
             read_task: Some(tokio::spawn(async {})),
             stderr_task: Some(tokio::spawn(async {})),
             timeouts: ClientTimeouts::default(),
@@ -405,7 +410,7 @@ mod tests {
         assert!(client.read_task.is_none(), "read task must be joined");
         assert!(client.stderr_task.is_none(), "stderr task must be joined");
         assert!(
-            client.notifications.is_none(),
+            lock(&client.notifications).is_none(),
             "notification producer must be dropped"
         );
         match rx.try_recv() {

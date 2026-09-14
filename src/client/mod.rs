@@ -36,9 +36,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::Value;
-use tokio::sync::oneshot;
+use tokio::sync::{broadcast, oneshot};
 
 use crate::error::Error;
+use crate::protocol::Notification;
 
 /// Default capacity of the notification broadcast channel. When a slow
 /// receiver falls more than this many notifications behind, the oldest are
@@ -104,6 +105,32 @@ type PendingMap = Mutex<HashMap<String, oneshot::Sender<Result<Value, Error>>>>;
 /// Shared in-flight requests by request id (uuid-v4 string); the read loop
 /// resolves the matching sender when a response arrives.
 type PendingRequests = Arc<PendingMap>;
+
+/// The shared, droppable notification broadcast producer.
+///
+/// `HarnessClient` owns one clone of this `Arc<Mutex<Option<Sender>>>` and
+/// hands another clone to the read loop. The broadcast channel closes only
+/// when **every** `Sender` (the original wrapped here, plus any clones) is
+/// dropped — so a `NotificationSubscription::recv()` parked in
+/// `broadcast::Receiver::recv().await` resolves with `RecvError::Closed`
+/// the moment the last `Sender` goes away, and `recv()` returns
+/// [`Error::TransportClosed`] with the process diagnostics. This is the
+/// documented contract: "once the channel (or the client) is closed,
+/// [`Error::TransportClosed`] is returned with the process diagnostics."
+///
+/// Putting the producer behind a shared `Option` is what lets the read
+/// loop's EOF path (spontaneous runtime death — stdout EOF without an
+/// explicit `close()`) and the close ladder's `finish_teardown` (explicit
+/// `close()`) **both** drop the original `Sender` simply by setting the
+/// inner to `None`. Before this indirection, the original `Sender` lived
+/// directly on `HarnessClient` for the client's whole lifetime, so on a
+/// spontaneous death the read loop dropped only its **clone**, the channel
+/// stayed open, and a `recv()` parked before the death never woke (the
+/// `state.closed` flag is checked only at the top of `recv`'s loop, before
+/// the unbounded `receiver.recv().await`) — `Session::run` could then wedge
+/// indefinitely mid-turn. Sharing the `Option` closes the channel from
+/// either path, so the parked-`recv` behavior is honored uniformly.
+type NotificationsProducer = Arc<Mutex<Option<broadcast::Sender<Notification>>>>;
 
 /// Build a transport-closed error with the exit status and captured stderr
 /// tail appended (TS `closedError` parity).

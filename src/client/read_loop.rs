@@ -6,16 +6,16 @@ use std::sync::{Arc, Mutex, Weak};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout};
-use tokio::sync::{broadcast, Notify};
+use tokio::sync::Notify;
 
 use crate::error::Error;
-use crate::protocol::{IncomingFrame, JsonRpcId, JsonRpcResponseOutcome, Notification};
+use crate::protocol::{IncomingFrame, JsonRpcId, JsonRpcResponseOutcome};
 use crate::transport::{write_frame, JsonRpcLineTransport};
 
 use super::session_tree::{record_session_relationship, ParentMap};
 use super::{
-    fail_all_pending, lock, PendingMap, PendingRequests, SharedState, MAX_STDERR_LINE,
-    STDERR_TAIL_LIMIT, TASK_JOIN_GRACE,
+    fail_all_pending, lock, NotificationsProducer, PendingMap, PendingRequests, SharedState,
+    MAX_STDERR_LINE, STDERR_TAIL_LIMIT, TASK_JOIN_GRACE,
 };
 
 /// The read loop's shared context: every client handle it needs to dispatch
@@ -30,8 +30,13 @@ pub(super) struct ReadContext {
     pub(super) pending: PendingRequests,
     /// The client-side session-tree edge map.
     pub(super) parent_map: Arc<Mutex<ParentMap>>,
-    /// Notification producer fanned out to subscriptions.
-    pub(super) notifications: broadcast::Sender<Notification>,
+    /// Notification producer fanned out to subscriptions. Shared with
+    /// `HarnessClient` so the EOF path below can drop the original `Sender`
+    /// (`Option::take`) and close the channel — a parked
+    /// `NotificationSubscription::recv()` then resolves with
+    /// `RecvError::Closed` → `Error::TransportClosed`. See
+    /// [`NotificationsProducer`](super::NotificationsProducer).
+    pub(super) notifications: NotificationsProducer,
     /// Shared client state (exit code, closed flag, stderr tail).
     pub(super) state: Arc<Mutex<SharedState>>,
     /// Signalled when the captured stderr stream has fully drained.
@@ -90,6 +95,16 @@ pub(super) async fn read_loop(
         &ctx.state,
         "DeepSeek Harness runtime stdout closed",
     );
+    // Drop the client-owned notification producer (set the shared inner to
+    // `None`) so the broadcast channel closes immediately. Without this,
+    // `HarnessClient` keeps the original `Sender` for its lifetime and a
+    // `recv()` parked in `Receiver::recv().await` never wakes — `recv()`
+    // checks `state.closed` only at the top of its loop, before the await,
+    // so a death that lands while parked must be observed via the channel
+    // closure. Mirrors `close()`'s `finish_teardown`. (Safe to call after
+    // `fail_all_pending`: the only lock held there has been released, and
+    // `notifications` is never acquired under the state or pending lock.)
+    *lock(&ctx.notifications) = None;
 }
 
 /// Dispatch one parsed frame: response / client-directed request /
@@ -98,7 +113,7 @@ async fn dispatch_frame(
     frame: Value,
     pending: &PendingMap,
     parent_map: &Mutex<ParentMap>,
-    notifications: &broadcast::Sender<Notification>,
+    notifications: &NotificationsProducer,
     stdin: &Weak<tokio::sync::Mutex<ChildStdin>>,
 ) {
     let frame = match serde_json::from_value::<IncomingFrame>(frame) {
@@ -152,7 +167,15 @@ async fn dispatch_frame(
             // the fresh edge (descendants discovered mid-stream match from
             // their first event onward).
             record_session_relationship(&mut lock(parent_map), &notification);
-            let _ = notifications.send(notification);
+            // Fan out under the producer lock. If the producer is `None`
+            // (EOF or close already took it), there is nobody to send to —
+            // the channel is closed and any live receiver will see
+            // `RecvError::Closed` on its own `recv()`, which is the correct
+            // observation; silently dropping the late notification here
+            // matches that behavior.
+            if let Some(sender) = &*lock(notifications) {
+                let _ = sender.send(notification);
+            }
         }
     }
 }
