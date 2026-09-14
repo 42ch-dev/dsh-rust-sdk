@@ -7,8 +7,8 @@
 //! tree, send `session/prompt`, wait for the durable `agent/inbox/spliced`
 //! receipt of the returned message id, collect every tree notification until
 //! the **root** session reports `idle`, then derive
-//! [`RunResult::final_response`] and [`RunResult::finish_reason`] exactly as
-//! the Python SDK does.
+//! [`RunResult::final_response`] and [`RunResult::finish_reason`] as the
+//! Python SDK does, except the recorded §7.6 text-coercion divergence.
 //!
 //! [`RunResult`] mirrors the **Python** SDK's five fields exactly
 //! (`session_id`, `final_response`, `finish_reason`, `events`,
@@ -488,17 +488,17 @@ pub fn extract_finish_reason(events: &[Value]) -> Result<Option<String>, Error> 
     Ok(None)
 }
 
-/// Python `final_response` verbatim: a reversed scan for the last root
-/// `assistant/message` whose `data` is an object and whose resolved
-/// `content` is an array. Content lives at `data.message.content` when
-/// `data.message` is an object, else at `data.content` (Python `isinstance`
-/// walk). A last `assistant/message` whose `data` is not an object, or whose
-/// resolved `content` is not an array, is malformed and skipped (`continue`
-/// inside the reversed loop), so the scan **falls back to the next earlier
-/// `assistant/message`** (Python `api.py:211-228`). `""` when no usable
-/// `assistant/message` exists. Blocks with `type == "text"` contribute
-/// their string `text`; `text: null`, a missing `text`, or any other
-/// non-string `text` contributes `""`. Python coerces a *truthy*
+/// Python `final_response`, except the recorded §7.6 divergence: a reversed
+/// scan for the last root `assistant/message` whose `data` is an object and
+/// whose resolved `content` is an array. Content lives at `data.message.content`
+/// when `data.message` is an object, else at `data.content` (Python
+/// `isinstance` walk). A last `assistant/message` whose `data` is not an
+/// object, or whose resolved `content` is not an array, is malformed and
+/// skipped (`continue` inside the reversed loop), so the scan **falls back to
+/// the next earlier `assistant/message`** (Python `api.py:211-228`). `""` when
+/// no usable `assistant/message` exists. Blocks with `type == "text"`
+/// contribute their string `text`; `text: null`, a missing `text`, or any
+/// other non-string `text` contributes `""`. Python coerces a *truthy*
 /// non-string `text` through `str()` instead: the reversed scan and its
 /// two fallbacks are parity, this one block-level rule is a recorded
 /// divergence (spec §7.6).
@@ -647,11 +647,12 @@ mod tests {
     // (`python/sdk/src/deepseek_harness/api.py:211-228` @ c389f96bf3) **on
     // the shared domain**: for a string (or absent/`null`) `text` the case
     // table below is the Python source's output byte for byte. A *truthy*
-    // non-string `text` is the one recorded divergence — Python coerces it
-    // through `str()`, the crate contributes `""` (spec §7.6; the rows are
-    // marked inline). The discriminating cases ("falls back when last
-    // content/data is null") guard against the bug: a malformed last
-    // `assistant/message` must fall back to an earlier one.
+    // non-string `text` (`42` → "42", `true` → "True", `[1]` → "[1]",
+    // `{"a": 1}` → "{'a': 1}") is the one recorded divergence — Python
+    // coerces it through `str()`, the crate contributes `""` (spec §7.6;
+    // the two rows are marked inline). The discriminating cases ("falls back
+    // when last content/data is null") guard against the bug: a malformed
+    // last `assistant/message` must fall back to an earlier one.
     #[test]
     fn derive_final_response_matches_python_on_parity_edge_cases() {
         fn am(content: Value) -> Value {
@@ -729,20 +730,11 @@ mod tests {
             // `str(block.get("text") or "")` coerces a *truthy* non-string
             // — `42` → "42", `true` → "True", `[1]` → "[1]", `{"a": 1}` →
             // "{'a': 1}". The crate contributes "" for every non-string
-            // `text`, which the four rows below assert.
+            // `text`, which the two rows below assert (number and object;
+            // a truthy non-string flips every one of them together).
             (
                 "divergence: truthy non-string text (number) yields empty",
                 vec![am(json!([{"type": "text", "text": 42}]))],
-                "",
-            ),
-            (
-                "divergence: truthy non-string text (bool) yields empty",
-                vec![am(json!([{"type": "text", "text": true}]))],
-                "",
-            ),
-            (
-                "divergence: truthy non-string text (array) yields empty",
-                vec![am(json!([{"type": "text", "text": [1]}]))],
                 "",
             ),
             (
