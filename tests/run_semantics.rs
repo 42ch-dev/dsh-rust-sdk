@@ -523,6 +523,44 @@ async fn final_response_falls_back_when_last_assistant_message_data_is_not_an_ob
 }
 
 #[tokio::test]
+async fn final_response_is_empty_when_every_assistant_message_in_the_window_is_malformed() {
+    // The exhausted-scan complement of the fallback cases: when the reversed
+    // scan skips every `assistant/message` in the interval — here a non-array
+    // `content` and two non-object `data` values (`null` and an array, the
+    // latter covering a non-object `data` that is not `null`) — there is no
+    // earlier usable message to fall back to, so `final_response` is ""
+    // (spec §6.2). The scan is exhausted, not aborted: the run still
+    // completes and the last `turn/end` still yields its reason.
+    let mut script = run_prefix("msg-exhausted");
+    script.extend([
+        emit("session.event", root_event(receipt_event("msg-exhausted"))),
+        emit(
+            "session.event",
+            root_event(assistant_event(serde_json::Value::Null)),
+        ),
+        emit(
+            "session.event",
+            root_event(json!({"type": "assistant/message", "data": null})),
+        ),
+        emit(
+            "session.event",
+            root_event(json!({"type": "assistant/message", "data": []})),
+        ),
+        emit("session.event", root_event(turn_end("completed"))),
+        emit("session.status", idle(ROOT_SESSION)),
+        exit(0),
+    ]);
+    let result = run_once(&script, "hello").await.expect("run succeeds");
+
+    assert_eq!(
+        result.final_response, "",
+        "an interval whose every assistant/message is malformed must yield \
+         \"\" once the reversed scan is exhausted (spec §6.2)"
+    );
+    assert_eq!(result.finish_reason.as_deref(), Some("completed"));
+}
+
+#[tokio::test]
 async fn prompt_error_propagates_and_client_stays_usable() {
     let script = [
         expect("initialize"),

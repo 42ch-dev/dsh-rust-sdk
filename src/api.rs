@@ -7,8 +7,8 @@
 //! tree, send `session/prompt`, wait for the durable `agent/inbox/spliced`
 //! receipt of the returned message id, collect every tree notification until
 //! the **root** session reports `idle`, then derive
-//! [`RunResult::final_response`] and [`RunResult::finish_reason`] exactly as
-//! the Python SDK does.
+//! [`RunResult::final_response`] and [`RunResult::finish_reason`] as the
+//! Python SDK does, except the recorded §7.6 text-coercion divergence.
 //!
 //! [`RunResult`] mirrors the **Python** SDK's five fields exactly
 //! (`session_id`, `final_response`, `finish_reason`, `events`,
@@ -442,13 +442,16 @@ pub struct RunResult {
     /// The SDK session id this turn ran on.
     pub session_id: String,
     /// Text concatenation of the last usable root `assistant/message`
-    /// event's text blocks (`text: null` or a non-string `text` contributes
-    /// `""`). The activity interval is scanned in reverse; a last
-    /// `assistant/message` whose `data` is not an object or whose resolved
-    /// `content` (`data.message.content` when `data.message` is an object,
-    /// else `data.content`) is not an array is skipped and the scan falls
-    /// back to the next earlier `assistant/message`. `""` when the interval
-    /// contains no usable `assistant/message` (Python algorithm,
+    /// event's text blocks: a string `text` contributes its value; `null`,
+    /// a missing `text`, or any other non-string `text` contributes `""`.
+    /// Python coerces a *truthy* non-string `text` through `str()` instead
+    /// (`42` → `"42"`, `true` → `"True"`) — a recorded divergence, not
+    /// parity (spec §7.6). The activity interval is scanned in reverse; a
+    /// last `assistant/message` whose `data` is not an object or whose
+    /// resolved `content` (`data.message.content` when `data.message` is an
+    /// object, else `data.content`) is not an array is skipped and the scan
+    /// falls back to the next earlier `assistant/message`. `""` when the
+    /// interval contains no usable `assistant/message` (Python algorithm,
     /// `python/sdk/src/deepseek_harness/api.py:211-228`).
     pub final_response: String,
     /// The last root `turn/end` event's `data.reason.kind` inside the
@@ -485,17 +488,20 @@ pub fn extract_finish_reason(events: &[Value]) -> Result<Option<String>, Error> 
     Ok(None)
 }
 
-/// Python `final_response` verbatim: a reversed scan for the last root
-/// `assistant/message` whose `data` is an object and whose resolved
-/// `content` is an array. Content lives at `data.message.content` when
-/// `data.message` is an object, else at `data.content` (Python `isinstance`
-/// walk). A last `assistant/message` whose `data` is not an object, or whose
-/// resolved `content` is not an array, is malformed and skipped (`continue`
-/// inside the reversed loop), so the scan **falls back to the next earlier
-/// `assistant/message`** (Python `api.py:211-228`). `""` when no usable
-/// `assistant/message` exists. Blocks with `type == "text"` contribute
-/// their string `text`; `text: null` (or a non-string `text`) contributes
-/// `""` (Python parity).
+/// Python `final_response`, except the recorded §7.6 divergence: a reversed
+/// scan for the last root `assistant/message` whose `data` is an object and
+/// whose resolved `content` is an array. Content lives at `data.message.content`
+/// when `data.message` is an object, else at `data.content` (Python
+/// `isinstance` walk). A last `assistant/message` whose `data` is not an
+/// object, or whose resolved `content` is not an array, is malformed and
+/// skipped (`continue` inside the reversed loop), so the scan **falls back to
+/// the next earlier `assistant/message`** (Python `api.py:211-228`). `""` when
+/// no usable `assistant/message` exists. Blocks with `type == "text"`
+/// contribute their string `text`; `text: null`, a missing `text`, or any
+/// other non-string `text` contributes `""`. Python coerces a *truthy*
+/// non-string `text` through `str()` instead: the reversed scan and its
+/// two fallbacks are parity, this one block-level rule is a recorded
+/// divergence (spec §7.6).
 fn derive_final_response(events: &[Value]) -> String {
     for event in events.iter().rev() {
         if event.get("type").and_then(Value::as_str) != Some("assistant/message") {
@@ -521,6 +527,10 @@ fn derive_final_response(events: &[Value]) -> String {
         return blocks
             .iter()
             .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+            // A non-string `text` (including `null` and a missing key)
+            // contributes "". Python's `str(block.get("text") or "")` coerces
+            // a *truthy* non-string instead — the recorded divergence, spec
+            // §7.6; do not "fix" this back without a superseding decision.
             .map(|block| block.get("text").and_then(Value::as_str).unwrap_or(""))
             .collect();
     }
@@ -634,12 +644,15 @@ mod tests {
     }
 
     // Cross-implementation parity with upstream Python `final_response`
-    // (`python/sdk/src/deepseek_harness/api.py:211-228` @ c389f96bf3). The
-    // edge cases and expected outputs are the ones the cited Python source
-    // produces, so the Rust port is locked to it line for line. The
-    // discriminating cases ("falls back when last content/data is null")
-    // guard against the bug: a malformed last `assistant/message` must
-    // fall back to an earlier one.
+    // (`python/sdk/src/deepseek_harness/api.py:211-228` @ c389f96bf3) **on
+    // the shared domain**: for a string (or absent/`null`) `text` the case
+    // table below is the Python source's output byte for byte. A *truthy*
+    // non-string `text` (`42` → "42", `true` → "True", `[1]` → "[1]",
+    // `{"a": 1}` → "{'a': 1}") is the one recorded divergence — Python
+    // coerces it through `str()`, the crate contributes `""` (spec §7.6;
+    // the two rows are marked inline). The discriminating cases ("falls back
+    // when last content/data is null") guard against the bug: a malformed
+    // last `assistant/message` must fall back to an earlier one.
     #[test]
     fn derive_final_response_matches_python_on_parity_edge_cases() {
         fn am(content: Value) -> Value {
@@ -713,14 +726,48 @@ mod tests {
                 vec![am(json!(["str", 42, {"type": "text", "text": "ok"}, null]))],
                 "ok",
             ),
+            // Recorded divergence (spec §7.6): Python's
+            // `str(block.get("text") or "")` coerces a *truthy* non-string
+            // — `42` → "42", `true` → "True", `[1]` → "[1]", `{"a": 1}` →
+            // "{'a': 1}". The crate contributes "" for every non-string
+            // `text`, which the two rows below assert (number and object;
+            // a truthy non-string flips every one of them together).
+            (
+                "divergence: truthy non-string text (number) yields empty",
+                vec![am(json!([{"type": "text", "text": 42}]))],
+                "",
+            ),
+            (
+                "divergence: truthy non-string text (object) yields empty",
+                vec![am(json!([{"type": "text", "text": {"a": 1}}]))],
+                "",
+            ),
+            // Python's `isinstance(data.get("message"), dict)` is false for a
+            // non-object `message`, so content resolves at `data.content`.
+            (
+                "message present but not an object: data.content is used",
+                vec![am_data(json!({
+                    "message": "not-an-object",
+                    "content": [{"type": "text", "text": "flat"}],
+                }))],
+                "flat",
+            ),
+            // Python fallback #1 with a non-object `data` that is not `null`.
+            (
+                "non-object data (not null) is skipped",
+                vec![am_data(json!([]))],
+                "",
+            ),
         ];
         for (id, events, expected) in cases {
             assert_eq!(
                 derive_final_response(events),
                 *expected,
                 "{id}: Rust `derive_final_response` must match upstream Python \
-                 `final_response` byte-for-byte (python/sdk/src/deepseek_harness/api.py:211-228 \
-                 @ c389f96bf3)"
+                 `final_response` byte-for-byte on the shared domain \
+                 (python/sdk/src/deepseek_harness/api.py:211-228 @ c389f96bf3); \
+                 the `divergence:` rows assert the crate's recorded rule instead \
+                 (spec §7.6)"
             );
         }
     }

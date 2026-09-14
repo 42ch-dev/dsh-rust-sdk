@@ -101,7 +101,7 @@ The rustdoc "known variants" count MUST say six, not five.
 - `assistant/attempt` was added (`packages/core/session/src/types.ts:319`).
 - `assistant/chunk` was removed.
 
-Because the crate keeps `session.event.event` untyped (§3.2), the run path is unaffected: `final_response` reads the last root `assistant/message`'s `data.message.content`, and `finish_reason` reads the last root `turn/end`'s `data.reason.kind`. The crate MUST NOT claim `assistant/chunk` support and MUST NOT parse the embedded v2 stream (non-goal). Documentation MUST state the v2 vocabulary.
+Because the crate keeps `session.event.event` untyped (§3.2), the run path is unaffected: `final_response` keeps the reversed-scan derivation of §6.2, and `finish_reason` reads the last root `turn/end`'s `data.reason.kind`. The crate MUST NOT claim `assistant/chunk` support and MUST NOT parse the embedded v2 stream (non-goal). Documentation MUST state the v2 vocabulary.
 
 ---
 
@@ -138,9 +138,9 @@ Crate-only fields MUST NOT exist beyond `timeouts` (the close-ladder struct, a l
 
 Evidence: `python/sdk/src/deepseek_harness/api.py:40-46`; `packages/sdk/client/src/types.ts:69-79`; upstream asserts the removal at `python/sdk/tests/test_client.py:880`.
 
-Derivation algorithms MUST match Python exactly:
+Derivation algorithms MUST match Python exactly except where §7 records a divergence:
 
-- `final_response` — reversed scan for the last root `assistant/message` whose `data` is an object and whose resolved `content` (`data.message.content` when `data.message` is an object, else `data.content`) is an array; a malformed last `assistant/message` (non-object `data` or non-array `content`) is skipped via `continue` and the scan falls back to the next earlier `assistant/message` (Python `continue` inside `reversed()`, `python/sdk/src/deepseek_harness/api.py:211-228`); a non-string `text` contributes `""`; `""` when no usable `assistant/message` exists.
+- `final_response` — reversed scan for the last root `assistant/message` whose `data` is an object and whose resolved `content` (`data.message.content` when `data.message` is an object, else `data.content`) is an array; a malformed last `assistant/message` (non-object `data` or non-array `content`) is skipped via `continue` and the scan falls back to the next earlier `assistant/message` (Python `continue` inside `reversed()`, `python/sdk/src/deepseek_harness/api.py:211-228`); a string `text` contributes its value while `null`, a missing `text`, or any other non-string `text` contributes `""` (Python coerces a *truthy* non-string `text` through `str()` instead — a recorded divergence, §7.6); `""` when no usable `assistant/message` exists.
 - `finish_reason` — last root `turn/end`'s `data.reason.kind` inside the activity interval; no `turn/end` → `None`; a malformed last `turn/end` → protocol error with the exact message `turn/end event requires a string data.reason.kind`; malformedness is checked only on the last one (reversed scan) (`python/sdk/src/deepseek_harness/api.py:231-248`).
 - The runtime's `turn/end` reason vocabulary is six kinds — `completed`, `aborted`, `blocked`, `error`, `max-tokens`, `interrupted` (`packages/core/session/src/types.ts:198-222`) — and MUST stay a string, not a closed enum.
 
@@ -202,7 +202,7 @@ Python exposes `next_request` / `respond` / `respond_error` / `notify` (`python/
 
 The crate fails the run with a protocol error when a `session.event` or `session.status` payload fails its shape check, in receipt-wait, event-collection, and idle-detection paths (`src/api.rs:220-240,261-280,285-303`). Python silently skips a malformed `event` / `status` and only raises on a malformed last `turn/end` (`python/sdk/src/deepseek_harness/api.py:149-181,245-246`); TypeScript raises for a malformed `session.event` envelope but ignores a malformed `session.status` (`packages/sdk/client/src/api.ts:189,210-212,264-286`).
 
-Verdict: **keep the strictness** (it converts a silent hang into a typed failure) but **do not claim it is Python parity**. The rustdoc MUST say the policy is intentionally stricter. This is the one place where "follows Python" does not hold, and the docs must say so.
+Verdict: **keep the strictness** (it converts a silent hang into a typed failure) but **do not claim it is Python parity**. The rustdoc MUST say the policy is intentionally stricter. This is one place where "follows Python" does not hold, and the docs must say so.
 
 Related: the crate's embedded stderr text is capped (8 KiB, newest lines first) while both references embed the whole 400-line tail; and the crate's broadcast buffer is bounded with a fail-fast on observed lag where Python's queue is unbounded. Both are documented local robustness choices, not parity claims.
 
@@ -213,6 +213,12 @@ The crate requires exact equality with `deepseek-harness-sdk-runtime` (`packages
 ### 7.5 Rust-only ergonomics
 
 No `DeepSeekHarness::run` convenience and no lazy start: the crate requires an explicit `DeepSeekHarness::start`. Python has both a `run` convenience and lazy start (`python/sdk/src/deepseek_harness/api.py:121,124-131`); TypeScript lazily starts inside `run` (`packages/sdk/client/src/api.ts:177`). The divergence is documented in the crate's README and stays a non-goal.
+
+### 7.6 Non-string `text` in `final_response`
+
+Python appends `str(block.get("text") or "")` (`python/sdk/src/deepseek_harness/api.py:226`), which **coerces** a *truthy* non-string `text`: `42` → `"42"`, `true` → `"True"`, `[1]` → `"[1]"`, `{"a": 1}` → `"{'a': 1}"`. The crate contributes `""` for **every** non-string `text` — `null`, a missing key, and any truthy non-string alike. The two therefore agree wherever `text` is a string, `null`, or absent (and on every falsy non-string, which Python also maps to `""`), and diverge only on a truthy non-string value, which a conformant runtime never emits: `text` blocks are strings (`packages/llm/llm/src/types.ts:55-58`).
+
+Verdict: **keep the crate's rule**. Faithfully emulating `str()` for arbitrary JSON values would need a Python-`repr` formatter (bool → `True`, float `1.0` → `"1.0"`, dict → `{'a': 1}`, `inf`, …) to serve a path unreachable from a conformant runtime, which the crate's simplicity rules reject. The rustdoc on `RunResult::final_response` and `derive_final_response` states the real rule and points here; the `derive_final_response` unit table asserts both the shared-domain parity and these divergence rows.
 
 ---
 
