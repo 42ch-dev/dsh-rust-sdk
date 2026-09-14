@@ -133,13 +133,13 @@ even on first boot).
 The wheel ships the runtime as a self-contained single-file executable — no
 system Node.js needed at runtime (the plugin tree is embedded) — and installs
 the normal `dsh` CLI as `deepseek-harness-sdk-runtime-<platform>-<arch>`.
-Published targets are **Linux x64, Linux arm64, macOS arm64, and Windows
-x64** (Windows uses the `.exe` suffix); **macOS x64 is not published** — on
-that platform use Route C. macOS needs its sibling `-spawn-helper` beside the
-executable (`node-pty`), and the Linux/macOS wheels carry a `-rg` ripgrep
-sidecar (Windows `-rg.exe`) — copy any sidecar along when you relocate the
-executable. Because the wheel needs no system Node.js at runtime, it stays
-the fallback for Windows and for users who cannot install Node.js.
+Published targets are **Linux x64, Linux arm64, macOS arm64, macOS x64, and
+Windows x64** (Windows uses the `.exe` suffix); no Windows arm64 wheel is
+published. macOS needs its sibling `-spawn-helper` beside the executable
+(`node-pty`), and the Linux/macOS wheels carry a `-rg` ripgrep sidecar
+(Windows `-rg.exe`) — copy any sidecar along when you relocate the executable.
+Because the wheel needs no system Node.js at runtime, it stays the fallback
+for Windows and for users who cannot install Node.js.
 
 ### Route C — build from source
 
@@ -149,9 +149,8 @@ Build the runtime executable from source with the
 point `DSH_RUNTIME_BIN` (or `Config::dsh_bin`) at the built executable.
 Building from source is the only route that reproduces the exact contract
 basis this crate was verified against (`git checkout c389f96bf3` in the
-official repository before building), and it is the route for platforms
-without a published artifact — notably **macOS x64**, for which no wheel is
-published.
+official repository before building), and it is the route for any platform
+that has no published wheel.
 
 ### How the SDK resolves the runtime
 
@@ -461,9 +460,8 @@ Each row names what it was and what replaces it:
 ## Platform support & MSRV
 
 The SDK itself is pure Rust and platform-light; the consumed runtime decides
-the platform matrix. Upstream publishes the runtime for **4 targets**: Linux
-x64, Linux arm64, macOS arm64, and Windows x64 (macOS x64 is not published —
-see [Runtime acquisition](#runtime-acquisition)).
+the platform matrix. Upstream publishes the runtime for **5 targets** — the
+list is in [Runtime acquisition](#runtime-acquisition), Route B.
 
 MSRV: current stable Rust (no minimum is pinned in `Cargo.toml`; the crate
 tracks the stable toolchain).

@@ -126,12 +126,12 @@ export DSH_RUNTIME_BIN="$(python -c 'import deepseek_harness_runtime as r; print
 wheel 把运行时打包为自包含的单文件可执行文件——运行时不需要系统
 Node.js（插件树已内嵌）——并安装普通的 `dsh` CLI，名为
 `deepseek-harness-sdk-runtime-<platform>-<arch>`。已发布目标为 **Linux
-x64、Linux arm64、macOS arm64、Windows x64**（Windows 使用 `.exe`
-后缀）；**macOS x64 未发布**——该平台请使用途径 C。macOS 需要可执行
-文件旁的伴生 `-spawn-helper`（`node-pty`），Linux/macOS wheel 携带
-`-rg` ripgrep 伴随文件（Windows 为 `-rg.exe`）——移动可执行文件时请把
-伴随文件一并复制。由于 wheel 运行时不依赖系统 Node.js，它仍是 Windows
-及无法安装 Node.js 的用户的备选途径。
+x64、Linux arm64、macOS arm64、macOS x64、Windows x64**（Windows 使用
+`.exe` 后缀）；Windows arm64 没有 wheel 发布。macOS 需要可执行文件旁的
+伴生 `-spawn-helper`（`node-pty`），Linux/macOS wheel 携带 `-rg` ripgrep
+伴随文件（Windows 为 `-rg.exe`）——移动可执行文件时请把伴随文件一并复制。
+由于 wheel 运行时不依赖系统 Node.js，它仍是 Windows 及无法安装 Node.js
+的用户的备选途径。
 
 ### 途径 C —— 从源码构建
 
@@ -139,8 +139,7 @@ x64、Linux arm64、macOS arm64、Windows x64**（Windows 使用 `.exe`
 `build-exe-for-python-sdk` 脚本构建运行时可执行文件，然后把
 `DSH_RUNTIME_BIN`（或 `Config::dsh_bin`）指向构建产物。从源码构建是唯一
 能精确复现本 crate 验证所依据的契约基线的途径（构建前先在官方仓库中
-`git checkout c389f96bf3`），也是没有已发布工件的平台——尤其是
-**macOS x64**（未发布 wheel）——的途径。
+`git checkout c389f96bf3`），也是任何没有已发布 wheel 的平台的途径。
 
 ### SDK 如何解析运行时
 
@@ -417,8 +416,7 @@ drop-oldest 语义的广播通道。如果高流量会话树在 SDK 两次读取
 ## 平台支持与 MSRV
 
 SDK 本体是纯 Rust、平台负担很小；平台矩阵由所消费的运行时决定。上游为
-运行时发布 **4 个目标**：Linux x64、Linux arm64、macOS arm64、Windows
-x64（macOS x64 未发布——见[运行时获取](#运行时获取)）。
+运行时发布 **5 个目标**——清单见[运行时获取](#运行时获取)的途径 B。
 
 MSRV：当前 stable Rust（`Cargo.toml` 未固定最低版本；本 crate 跟随稳定版
 工具链）。
