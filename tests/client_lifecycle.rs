@@ -822,14 +822,19 @@ async fn parked_recv_after_runtime_death_returns_closed() {
 
     match outcome {
         Ok(Err(Error::TransportClosed(message))) => {
-            // The stderr tail is guaranteed on this path only because the
-            // read loop drains stderr (bounded) *before* taking the producer
-            // at `src/client/read_loop.rs:86-107` — the ordering that lets
-            // the parked `recv()` wake with the diagnostics. The exit code is
-            // deliberately NOT asserted: it comes from a single best-effort
-            // poll of the child (`src/client/read_loop.rs:71-81`) that may
-            // find the child not yet reaped or the lock held, so a healthy
-            // build legitimately omits `exit code:` from this message.
+            // Every closed path builds its error from the same constant
+            // reason, so the reason is guaranteed here. The stderr tail is
+            // guaranteed too, because the read loop drains stderr (bounded)
+            // *before* the producer take — the ordering that lets the parked
+            // `recv()` wake with the diagnostics. The exit code is
+            // deliberately NOT asserted: it comes from the read loop's single
+            // best-effort poll of the child, which may find it not yet reaped
+            // or the lock held, so a healthy build legitimately omits
+            // `exit code:` from this message.
+            assert!(
+                message.contains("DeepSeek Harness runtime closed"),
+                "the closed reason must reach the parked recv: {message}"
+            );
             assert!(
                 message.contains("fatal: runtime panicked"),
                 "the EOF-path stderr tail must reach the parked recv: {message}"
@@ -956,9 +961,15 @@ async fn session_run_surfaces_transport_closed_on_mid_turn_death() {
 
     match outcome {
         Ok(Err(Error::TransportClosed(message))) => {
-            // Same guarantee as the parked-recv test: the read loop drains
-            // stderr (bounded) *before* taking the producer, so the tail the
-            // EOF path captured reaches the error `Session::run` surfaces.
+            // Same guarantees as the parked-recv test: the reason riding
+            // every closed error is the shared constant, and the read loop
+            // drains stderr (bounded) *before* the producer take, so the tail
+            // the EOF path captured reaches the error `Session::run`
+            // surfaces.
+            assert!(
+                message.contains("DeepSeek Harness runtime closed"),
+                "the closed reason must reach Session::run: {message}"
+            );
             assert!(
                 message.contains("fatal: runtime panicked"),
                 "the EOF-path stderr tail must reach Session::run: {message}"
@@ -990,8 +1001,8 @@ async fn session_run_surfaces_transport_closed_on_mid_turn_death() {
 /// returning `Ok(())`.
 ///
 /// This is the end-to-end guard for contracts the hand-built client
-/// skeletons in `src/client/core.rs` can only approximate: the producer take
-/// at `src/client/read_loop.rs:107` is what makes both hold.
+/// skeletons in `src/client/core.rs` can only approximate: the read loop's
+/// producer take on the EOF path is what makes both hold.
 #[tokio::test]
 async fn post_death_close_is_a_noop_and_subscriptions_are_born_failed() {
     let mut rt = FakeRuntime::spawn(&[
