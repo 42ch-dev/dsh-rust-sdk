@@ -441,11 +441,15 @@ pub enum Input {
 pub struct RunResult {
     /// The SDK session id this turn ran on.
     pub session_id: String,
-    /// Text concatenation of the **last** root `assistant/message` event's
-    /// text blocks (`text: null` or a non-string `text` contributes `""`);
-    /// `""` when the activity interval contains no `assistant/message` — or
-    /// the last one has no text blocks. Never falls back to an earlier
-    /// event (Python algorithm, `python/sdk/src/deepseek_harness/api.py:211-228`).
+    /// Text concatenation of the last usable root `assistant/message`
+    /// event's text blocks (`text: null` or a non-string `text` contributes
+    /// `""`). The activity interval is scanned in reverse; a last
+    /// `assistant/message` whose `data` is not an object or whose resolved
+    /// `content` (`data.message.content` when `data.message` is an object,
+    /// else `data.content`) is not an array is skipped and the scan falls
+    /// back to the next earlier `assistant/message`. `""` when the interval
+    /// contains no usable `assistant/message` (Python algorithm,
+    /// `python/sdk/src/deepseek_harness/api.py:211-228`).
     pub final_response: String,
     /// The last root `turn/end` event's `data.reason.kind` inside the
     /// activity interval (`None` when the window has no `turn/end`; Python
@@ -481,34 +485,46 @@ pub fn extract_finish_reason(events: &[Value]) -> Result<Option<String>, Error> 
     Ok(None)
 }
 
-/// Python `final_response` verbatim: the last root `assistant/message`
-/// event's text-block concatenation; `""` when absent or textless (never
-/// falls back to an earlier event). Blocks with `type == "text"` contribute
+/// Python `final_response` verbatim: a reversed scan for the last root
+/// `assistant/message` whose `data` is an object and whose resolved
+/// `content` is an array. Content lives at `data.message.content` when
+/// `data.message` is an object, else at `data.content` (Python `isinstance`
+/// walk). A last `assistant/message` whose `data` is not an object, or whose
+/// resolved `content` is not an array, is malformed and skipped (`continue`
+/// inside the reversed loop), so the scan **falls back to the next earlier
+/// `assistant/message`** (Python `api.py:211-228`). `""` when no usable
+/// `assistant/message` exists. Blocks with `type == "text"` contribute
 /// their string `text`; `text: null` (or a non-string `text`) contributes
 /// `""` (Python parity).
 fn derive_final_response(events: &[Value]) -> String {
-    let Some(last) = events
-        .iter()
-        .rev()
-        .find(|event| event.get("type").and_then(Value::as_str) == Some("assistant/message"))
-    else {
-        return String::new();
-    };
-    // Content lives at `data.message.content` when `data.message` is an
-    // object, else at `data.content` (Python `isinstance` walk).
-    let content = if last.pointer("/data/message").is_some_and(Value::is_object) {
-        last.pointer("/data/message/content")
-    } else {
-        last.pointer("/data/content")
-    };
-    let Some(blocks) = content.and_then(Value::as_array) else {
-        return String::new();
-    };
-    blocks
-        .iter()
-        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
-        .map(|block| block.get("text").and_then(Value::as_str).unwrap_or(""))
-        .collect()
+    for event in events.iter().rev() {
+        if event.get("type").and_then(Value::as_str) != Some("assistant/message") {
+            continue;
+        }
+        // Python fallback #1: `data` is not a dict.
+        let Some(data) = event.get("data").and_then(Value::as_object) else {
+            continue;
+        };
+        // Content lives at `data.message.content` when `data.message` is an
+        // object, else at `data.content` (Python `isinstance` walk).
+        let content_owner = match data.get("message") {
+            Some(message) if message.is_object() => message.as_object(),
+            _ => Some(data),
+        };
+        // Python fallback #2: resolved `content` is not a list.
+        let Some(blocks) = content_owner
+            .and_then(|owner| owner.get("content"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        return blocks
+            .iter()
+            .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+            .map(|block| block.get("text").and_then(Value::as_str).unwrap_or(""))
+            .collect();
+    }
+    String::new()
 }
 
 /// Python `_is_inbox_receipt` verbatim: an `agent/inbox/spliced` event whose
@@ -615,5 +631,97 @@ mod tests {
             extract_finish_reason(&events).unwrap(),
             Some("max-tokens".to_string())
         );
+    }
+
+    // Cross-implementation parity with upstream Python `final_response`
+    // (`python/sdk/src/deepseek_harness/api.py:211-228` @ c389f96bf3). The
+    // edge cases and expected outputs are the ones the cited Python source
+    // produces, so the Rust port is locked to it line for line. The
+    // discriminating cases ("falls back when last content/data is null")
+    // guard against the bug: a malformed last `assistant/message` must
+    // fall back to an earlier one.
+    #[test]
+    fn derive_final_response_matches_python_on_parity_edge_cases() {
+        fn am(content: Value) -> Value {
+            json!({"type": "assistant/message", "data": {"message": {"content": content}}})
+        }
+        fn am_data(data: Value) -> Value {
+            json!({"type": "assistant/message", "data": data})
+        }
+        let cases: &[(&str, Vec<Value>, &str)] = &[
+            ("empty interval", vec![], ""),
+            (
+                "single message",
+                vec![am(json!([{"type": "text", "text": "hi"}]))],
+                "hi",
+            ),
+            (
+                "last usable message wins",
+                vec![
+                    am(json!([{"type": "text", "text": "old"}])),
+                    am(json!([{"type": "text", "text": "new"}])),
+                ],
+                "new",
+            ),
+            (
+                "falls back when last content is null",
+                vec![
+                    am(json!([{"type": "text", "text": "earlier"}])),
+                    am(serde_json::Value::Null),
+                ],
+                "earlier",
+            ),
+            (
+                "falls back when last data is null",
+                vec![
+                    am(json!([{"type": "text", "text": "earlier"}])),
+                    am_data(serde_json::Value::Null),
+                ],
+                "earlier",
+            ),
+            (
+                "falls back when last content is a scalar",
+                vec![
+                    am(json!([{"type": "text", "text": "earlier"}])),
+                    am(json!("not-an-array")),
+                ],
+                "earlier",
+            ),
+            (
+                "all malformed yields empty",
+                vec![
+                    am(serde_json::Value::Null),
+                    am_data(serde_json::Value::Null),
+                ],
+                "",
+            ),
+            (
+                "isinstance walk: flat data.content",
+                vec![am_data(
+                    json!({"content": [{"type": "text", "text": "flat"}]}),
+                )],
+                "flat",
+            ),
+            (
+                "null text contributes empty",
+                vec![am(json!([{"type": "text", "text": null}]))],
+                "",
+            ),
+            ("empty content list yields empty", vec![am(json!([]))], ""),
+            (
+                "non-object blocks skipped",
+                vec![am(json!(["str", 42, {"type": "text", "text": "ok"}, null]))],
+                "ok",
+            ),
+        ];
+        for (id, events, expected) in cases {
+            assert_eq!(
+                derive_final_response(events),
+                *expected,
+                "{id}: Rust `derive_final_response` must match upstream Python \
+                 `final_response` byte-for-byte (python/sdk/src/deepseek_harness/api.py:211-228 \
+                 @ c389f96bf3)"
+            );
+        }
     }
 }
