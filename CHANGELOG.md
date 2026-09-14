@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-14
+
+### Changed
+- The runtime platform matrix is documented as a pointer to the upstream published wheel list rather than a fixed enumeration, so the targets a consumer is told about stay in step with what upstream actually publishes (Windows x64 included; macOS needs the sibling `-spawn-helper`).
+
+### Fixed
+- `RunResult::final_response` now falls back to an earlier root `assistant/message`
+  when the last one is malformed (non-object `data` or non-array `content`),
+  matching the Python SDK's `final_response` reversed-scan algorithm. The
+  previous implementation returned `""` instead of trying an earlier event.
+- Corrected the public rustdoc on `RunResult::final_response` and the normative
+  spec §6.2, which both incorrectly claimed `final_response` "never falls back
+  to an earlier event" while citing the Python source that does fall back.
+  The behavior is unreachable from a conformant runtime (which always emits
+  `message.content` as a JSON array) but the algorithm and docs now agree.
+- `RunResult::final_response` treats a non-string `text` block (including
+  `null`) as `""`. That is a recorded divergence from the Python SDK, which
+  coerces a truthy non-string via `str()` (`42` → `"42"`, `true` → `"True"`).
+  There is no runtime behavior change.
+- A `HarnessClient` dropped without an explicit `close()` now closes its notification channel, so a subscription awaiting the next notification returns `Error::TransportClosed` promptly instead of only when the aborted background reader task happens to be torn down. That error reports the closed reason, plus the runtime's exit code and captured stderr tail when they were observed.
+- `Config::dsh_bin` is the current runtime-binary override name (renamed from `Config::runtime_bin`; the `DSH_RUNTIME_BIN` environment route is preserved).
+- Runtime acquisition now documents all five targets upstream publishes for the
+  runtime — **Linux x64, Linux arm64, macOS arm64, macOS x64, and Windows
+  x64** — and no longer states that macOS x64 has no wheel. A macOS x64 wheel
+  is published, so Route B (the self-contained wheel) works there; Route C
+  (build from source) remains the route that reproduces the exact contract
+  basis this crate was verified against, and the fallback for any platform with
+  no published wheel.
+- `Session::run` no longer wedges indefinitely when the runtime dies mid-turn (stdout EOF after `session/prompt` succeeds but before the inbox receipt or root-idle notification arrives). The high-level API surfaces `Error::TransportClosed` with the closed reason and the stderr tail the end-of-stream path captured, plus the exit code when the best-effort poll of the exiting child observed it, as its doc contract always promised ("once the channel (or the client) is closed, `Error::TransportClosed` is returned").
+- `NotificationSubscription::recv` parked in `broadcast::Receiver::recv().await` now wakes with `TransportClosed` when the runtime dies spontaneously (stdout EOF without an explicit `close`), instead of hanging forever. The fix shares the original broadcast `Sender` between `HarnessClient` and the read loop and drops it on the read loop's EOF path, so the channel closes and a parked `recv` resolves with `RecvError::Closed`. Subscriptions created after runtime death remain born-failed.
+
 ## [0.2.0] - 2026-09-09
 
 ### Added
