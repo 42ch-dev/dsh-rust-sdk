@@ -261,6 +261,14 @@ impl Drop for HarnessClient {
         if let Some(handle) = self.stderr_task.take() {
             handle.abort();
         }
+        // Take the notification producer as well (the same `Option::take` the
+        // read loop's EOF path and `finish_teardown` perform): the broadcast
+        // channel closes here, so a subscription held across a
+        // drop-without-close wakes with `TransportClosed` deterministically,
+        // instead of only whenever the aborted read task happens to be
+        // dropped. Taking it twice is a no-op, so this stays safe when
+        // `close()` already ran the same tail.
+        *lock(&self.notifications) = None;
     }
 }
 
