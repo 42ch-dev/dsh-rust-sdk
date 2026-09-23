@@ -980,3 +980,214 @@ fn callback_panic_propagates_out_of_run() {
         "the propagated panic must be the callback's, not a harness panic: {message}"
     );
 }
+
+#[tokio::test]
+async fn v4_flat_tool_result_event_passes_through_verbatim() {
+    // dsh-v0.1.7-rc.1 reshaped the session format (V4): a tool result is no
+    // longer a `tool-result` content block — it is a `tool/result` event
+    // whose `data.message` is a FLAT `role:'tool'` message
+    // (`createToolResultMessage`, plan 11 task 1 WS-13/WS-15; no nested
+    // block wrapper, no `role:'user'`). The crate treats `session.event`
+    // payloads as opaque, so this locks that the new shape rides through
+    // parsing, `Session::run` collection, and the notification callback
+    // without a SdkProtocol error, and that the assistant/message +
+    // turn/end anchors still own `final_response`/`finish_reason`.
+    let tool_result = json!({
+        "type": "tool/result",
+        "data": {"message": {
+            "id": "tool-msg-1",
+            "role": "tool",
+            "source": {"kind": "tool", "callId": "call-1"},
+            "toolCallId": "call-1",
+            "content": [{"type": "text", "text": "tool output"}],
+            "isError": false,
+        }}
+    });
+    let mut script = run_prefix("msg-v4-tool");
+    script.extend([
+        emit("session.event", root_event(receipt_event("msg-v4-tool"))),
+        emit("session.event", root_event(tool_result.clone())),
+        emit(
+            "session.event",
+            root_event(assistant_event(
+                json!([{"type": "text", "text": "after the tool ran"}]),
+            )),
+        ),
+        emit("session.event", root_event(turn_end("completed"))),
+        emit("session.status", idle(ROOT_SESSION)),
+        exit(0),
+    ]);
+
+    let observed: Arc<Mutex<Vec<Notification>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut h = harness(&script).await;
+    let session = h.start_session(Some(ROOT_SESSION.to_string()));
+    let observed_for_callback = observed.clone();
+    let result = session
+        .run(
+            Input::Text("hello".to_string()),
+            Some(&move |notification: &Notification| {
+                observed_for_callback
+                    .lock()
+                    .expect("callback lock")
+                    .push(notification.clone());
+            }),
+        )
+        .await
+        .expect("the V4 tool/result event must not fail the run");
+    h.close().await.expect("clean close");
+
+    // The run completed to root idle: every interval event landed in
+    // transport order, the tool/result payload verbatim as emitted.
+    let types: Vec<&str> = result
+        .events
+        .iter()
+        .filter_map(|e| e.get("type").and_then(Value::as_str))
+        .collect();
+    assert_eq!(
+        types,
+        [
+            "agent/inbox/spliced",
+            "tool/result",
+            "assistant/message",
+            "turn/end"
+        ]
+    );
+    assert_eq!(
+        result.events[1], tool_result,
+        "the flattened V4 tool/result event must land verbatim in events"
+    );
+
+    // The callback observed the whole tree, tool/result included.
+    let observed = observed.lock().expect("observed lock");
+    let methods: Vec<&str> = observed.iter().map(|n| n.method.as_str()).collect();
+    assert_eq!(
+        methods,
+        [
+            "session.event",  // receipt
+            "session.event",  // tool/result
+            "session.event",  // assistant/message
+            "session.event",  // turn/end
+            "session.status", // root idle
+        ]
+    );
+    assert_eq!(
+        observed[1].payload.get("event"),
+        Some(&tool_result),
+        "the callback must observe the tool/result event verbatim"
+    );
+    assert_eq!(
+        observed[4].payload.get("sessionId").and_then(Value::as_str),
+        Some(ROOT_SESSION)
+    );
+    assert_eq!(
+        observed[4].payload.get("status").and_then(Value::as_str),
+        Some("idle")
+    );
+
+    // The derivation anchors are unaffected: the assistant/message + turn/end
+    // still own final_response/finish_reason despite the new event type.
+    assert_eq!(result.final_response, "after the tool ran");
+    assert_eq!(result.finish_reason.as_deref(), Some("completed"));
+}
+
+#[tokio::test]
+async fn v4_developer_message_event_passes_through_verbatim() {
+    // The other V4 addition: `developer/message` — a new event type whose
+    // `data.message.role` is `"developer"` (plan 11 task 1; the crate is
+    // shape-agnostic, any object works). Same pass-through lock as the
+    // tool/result sibling: no SdkProtocol, verbatim in `events` and in the
+    // callback, and the assistant/message + turn/end anchors still win.
+    let developer_message = json!({
+        "type": "developer/message",
+        "data": {"message": {
+            "id": "dev-msg-1",
+            "role": "developer",
+            "content": [{"type": "text", "text": "developer guidance"}],
+        }}
+    });
+    let mut script = run_prefix("msg-v4-dev");
+    script.extend([
+        emit("session.event", root_event(receipt_event("msg-v4-dev"))),
+        emit("session.event", root_event(developer_message.clone())),
+        emit(
+            "session.event",
+            root_event(assistant_event(
+                json!([{"type": "text", "text": "after the developer note"}]),
+            )),
+        ),
+        emit("session.event", root_event(turn_end("completed"))),
+        emit("session.status", idle(ROOT_SESSION)),
+        exit(0),
+    ]);
+
+    let observed: Arc<Mutex<Vec<Notification>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut h = harness(&script).await;
+    let session = h.start_session(Some(ROOT_SESSION.to_string()));
+    let observed_for_callback = observed.clone();
+    let result = session
+        .run(
+            Input::Text("hello".to_string()),
+            Some(&move |notification: &Notification| {
+                observed_for_callback
+                    .lock()
+                    .expect("callback lock")
+                    .push(notification.clone());
+            }),
+        )
+        .await
+        .expect("the V4 developer/message event must not fail the run");
+    h.close().await.expect("clean close");
+
+    // The run completed to root idle: every interval event landed in
+    // transport order, the developer/message payload verbatim as emitted.
+    let types: Vec<&str> = result
+        .events
+        .iter()
+        .filter_map(|e| e.get("type").and_then(Value::as_str))
+        .collect();
+    assert_eq!(
+        types,
+        [
+            "agent/inbox/spliced",
+            "developer/message",
+            "assistant/message",
+            "turn/end"
+        ]
+    );
+    assert_eq!(
+        result.events[1], developer_message,
+        "the V4 developer/message event must land verbatim in events"
+    );
+
+    // The callback observed the whole tree, developer/message included.
+    let observed = observed.lock().expect("observed lock");
+    let methods: Vec<&str> = observed.iter().map(|n| n.method.as_str()).collect();
+    assert_eq!(
+        methods,
+        [
+            "session.event",  // receipt
+            "session.event",  // developer/message
+            "session.event",  // assistant/message
+            "session.event",  // turn/end
+            "session.status", // root idle
+        ]
+    );
+    assert_eq!(
+        observed[1].payload.get("event"),
+        Some(&developer_message),
+        "the callback must observe the developer/message event verbatim"
+    );
+    assert_eq!(
+        observed[4].payload.get("sessionId").and_then(Value::as_str),
+        Some(ROOT_SESSION)
+    );
+    assert_eq!(
+        observed[4].payload.get("status").and_then(Value::as_str),
+        Some("idle")
+    );
+
+    // The derivation anchors are unaffected: the assistant/message + turn/end
+    // still own final_response/finish_reason despite the new event type.
+    assert_eq!(result.final_response, "after the developer note");
+    assert_eq!(result.finish_reason.as_deref(), Some("completed"));
+}
