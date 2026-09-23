@@ -147,10 +147,12 @@ Build the runtime executable from source with the
 `build-exe-for-python-sdk` script from the
 [official repository](https://github.com/deepseek-ai/deepseek-harness), then
 point `DSH_RUNTIME_BIN` (or `Config::dsh_bin`) at the built executable.
-Building from source is the only route that reproduces the exact contract
-basis this crate was verified against (`git checkout c389f96bf3` in the
-official repository before building), and it is the route for any platform
-that has no published wheel.
+Building from source is the only route that reproduces the upstream ref
+the contract specs are frozen at (`git checkout c389f96bf3` in the
+official repository before building) — the specs' citation basis, distinct
+from the runtime version under test, which CI owns via its own pin in
+`.github/workflows/ci.yml`. Building from source is also the route for any
+platform that has no published wheel.
 
 ### How the SDK resolves the runtime
 
@@ -299,8 +301,10 @@ advance:
 - `assistant/chunk` was removed — the crate does not claim `assistant/chunk`
   support and does not parse the embedded stream (non-goal).
 
-The v4 event shapes are test-locked as verbatim passthrough in the crate's
-run-semantics suite.
+Test-locking is scoped to exactly two v4 shapes: the flattened
+`tool/result` event (a flat `role: "tool"` message) and the
+`developer/message` passthrough — both locked as verbatim passthrough in
+the crate's run-semantics suite.
 
 ### Content block vocabulary
 
