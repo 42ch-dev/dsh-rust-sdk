@@ -259,15 +259,18 @@ pub async fn run(
 请用 `tokio::time::timeout` 包住该调用——这只约束本地等待，不约束运行时
 侧的执行。
 
-### 会话格式 v2
+### 会话格式
 
-运行时的 `session.event` 词汇是**会话格式 v2**（非线上变更）。crate 记录
-v2 词汇并保持事件载荷无类型，因此 run 路径不受影响：
+crate 保持 `session.event` 载荷**无类型**，因此上游会话格式的演进
+（v2 … v4）原样透传，不触及 run 路径。v2 变迁作为其中一次演进的历史
+记录保留在下方：
 
-- `assistant/message` 现在携带内嵌的 `stream: AssistantStreamRecord[]`；
+- `assistant/message` 携带内嵌的 `stream: AssistantStreamRecord[]`；
 - 新增 `assistant/attempt`；
-- 移除 `assistant/chunk`——crate 不声称支持 `assistant/chunk`，本迭代也
-  不解析内嵌的 v2 stream（非目标）。
+- 移除 `assistant/chunk`——crate 不声称支持 `assistant/chunk`，也不解析
+  内嵌 stream（非目标）。
+
+v4 事件形态的逐字透传已由 crate 的 run-semantics 测试套件锁定。
 
 ### 内容块词汇
 

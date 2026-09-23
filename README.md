@@ -287,17 +287,20 @@ parity); only the `session/prompt` request is bounded by
 `Config::request_timeout`. Callers needing a bound wrap the call in
 `tokio::time::timeout` — this bounds the local wait, not the runtime's turn.
 
-### Session format v2
+### Session format
 
-The runtime's `session.event` vocabulary is **session format v2** (no wire
-change). The crate documents the v2 vocabulary and keeps event payloads
-untyped, so the run path is unaffected:
+The crate keeps `session.event` payloads **untyped**, so upstream
+session-format advances (v2 … v4) pass through without touching the run
+path. The v2 transition is kept below as a historical record of one such
+advance:
 
-- `assistant/message` now carries an embedded
-  `stream: AssistantStreamRecord[]`;
+- `assistant/message` carries an embedded `stream: AssistantStreamRecord[]`;
 - `assistant/attempt` was added;
 - `assistant/chunk` was removed — the crate does not claim `assistant/chunk`
-  support and does not parse the embedded v2 stream (non-goal).
+  support and does not parse the embedded stream (non-goal).
+
+The v4 event shapes are test-locked as verbatim passthrough in the crate's
+run-semantics suite.
 
 ### Content block vocabulary
 
