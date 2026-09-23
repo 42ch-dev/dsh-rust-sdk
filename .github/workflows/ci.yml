@@ -58,14 +58,13 @@ jobs:
   # and it is not a required check for docs-only PRs (making it a required
   # gate is a PM decision, not a workflow change).
   #
-  # Pin rationale: the SDK launch/wire contract is frozen to deepseek-harness @
-  # c389f96bf3a9b6807cb71ed6bdad5849be0df6d8
-  # (`dsh-v0.1.3-alpha.2-133-gc389f96bf3`, 2026-09-08) — 0.1.3-alpha.2 is the
-  # closest published tag on that upstream line (existence verified via
-  # `npm view @deepseek-ai/dsh versions --json`). The newer 0.1.5-alpha.1
-  # (2026-09-08) has no verified contract alignment, so it is deliberately
-  # not used. Exact pin, never a dist-tag: the handshake result is
-  # reproducible run to run.
+  # Pin rationale: the SDK launch/wire contract was re-verified against
+  # deepseek-harness `dsh-v0.1.7-rc.1` (`46a7f68b`, 2026-09-23) — the launch
+  # and wire spec re-verification greps are green at that tag (see the
+  # `.mstar/specs/` drift amendment for the one content-block cluster,
+  # covered by the crate's `Unknown` passthrough + fixture suite), and V4
+  # session events pass through as opaque values. Exact pin, never a
+  # dist-tag: the handshake result is reproducible run to run.
   keyless-runtime-handshake:
     name: keyless runtime handshake (pinned dsh)
     runs-on: ubuntu-latest
@@ -87,11 +86,11 @@ jobs:
           path: ~/.npm
           # keyed on the exact pin: the tarball for that version is immutable,
           # so a hit is the full npm cache the pinned global install needs
-          key: ${{ runner.os }}-npm-dsh-cli-0.1.3-alpha.2
+          key: ${{ runner.os }}-npm-dsh-cli-0.1.7-rc.1
 
       - name: Install pinned dsh runtime
         # exact pin (never a dist-tag); rationale in the job comment above
-        run: npm install -g @deepseek-ai/dsh@0.1.3-alpha.2
+        run: npm install -g @deepseek-ai/dsh@0.1.7-rc.1
 
       - name: Resolve runtime binary
         # Fail loudly when the pinned runtime cannot be resolved: an empty
@@ -100,7 +99,7 @@ jobs:
         run: |
           DSH_RUNTIME_BIN="$(command -v dsh)"
           if [ -z "$DSH_RUNTIME_BIN" ]; then
-            echo "::error::dsh not found on PATH after npm install -g @deepseek-ai/dsh@0.1.3-alpha.2"
+            echo "::error::dsh not found on PATH after npm install -g @deepseek-ai/dsh@0.1.7-rc.1"
             exit 1
           fi
           echo "DSH_RUNTIME_BIN=$DSH_RUNTIME_BIN" >> "$GITHUB_ENV"

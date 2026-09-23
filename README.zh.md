@@ -138,8 +138,10 @@ x64、Linux arm64、macOS arm64、macOS x64、Windows x64**（Windows 使用
 用[官方仓库](https://github.com/deepseek-ai/deepseek-harness)中的
 `build-exe-for-python-sdk` 脚本构建运行时可执行文件，然后把
 `DSH_RUNTIME_BIN`（或 `Config::dsh_bin`）指向构建产物。从源码构建是唯一
-能精确复现本 crate 验证所依据的契约基线的途径（构建前先在官方仓库中
-`git checkout c389f96bf3`），也是任何没有已发布 wheel 的平台的途径。
+能精确复现契约规格冻结所依据的上游 ref 的途径（构建前先在官方仓库中
+`git checkout c389f96bf3`）——这是规格的引用基线，不同于被测运行时版本；
+后者由 CI 以其自身固定的版本持有（见 `.github/workflows/ci.yml`）。从源
+码构建同时也是任何没有已发布 wheel 的平台的途径。
 
 ### SDK 如何解析运行时
 
@@ -259,15 +261,20 @@ pub async fn run(
 请用 `tokio::time::timeout` 包住该调用——这只约束本地等待，不约束运行时
 侧的执行。
 
-### 会话格式 v2
+### 会话格式
 
-运行时的 `session.event` 词汇是**会话格式 v2**（非线上变更）。crate 记录
-v2 词汇并保持事件载荷无类型，因此 run 路径不受影响：
+crate 保持 `session.event` 载荷**无类型**，因此上游会话格式的演进
+（v2 … v4）原样透传，不触及 run 路径。v2 变迁作为其中一次演进的历史
+记录保留在下方：
 
-- `assistant/message` 现在携带内嵌的 `stream: AssistantStreamRecord[]`；
+- `assistant/message` 携带内嵌的 `stream: AssistantStreamRecord[]`；
 - 新增 `assistant/attempt`；
-- 移除 `assistant/chunk`——crate 不声称支持 `assistant/chunk`，本迭代也
-  不解析内嵌的 v2 stream（非目标）。
+- 移除 `assistant/chunk`——crate 不声称支持 `assistant/chunk`，也不解析
+  内嵌 stream（非目标）。
+
+测试锁定精确限定于两个 v4 形态：扁平化的 `tool/result` 事件（扁平的
+`role: "tool"` 消息）与 `developer/message` 透传——二者均由 crate 的
+run-semantics 测试套件作为逐字透传锁定。
 
 ### 内容块词汇
 

@@ -147,10 +147,12 @@ Build the runtime executable from source with the
 `build-exe-for-python-sdk` script from the
 [official repository](https://github.com/deepseek-ai/deepseek-harness), then
 point `DSH_RUNTIME_BIN` (or `Config::dsh_bin`) at the built executable.
-Building from source is the only route that reproduces the exact contract
-basis this crate was verified against (`git checkout c389f96bf3` in the
-official repository before building), and it is the route for any platform
-that has no published wheel.
+Building from source is the only route that reproduces the upstream ref
+the contract specs are frozen at (`git checkout c389f96bf3` in the
+official repository before building) — the specs' citation basis, distinct
+from the runtime version under test, which CI owns via its own pin in
+`.github/workflows/ci.yml`. Building from source is also the route for any
+platform that has no published wheel.
 
 ### How the SDK resolves the runtime
 
@@ -287,17 +289,22 @@ parity); only the `session/prompt` request is bounded by
 `Config::request_timeout`. Callers needing a bound wrap the call in
 `tokio::time::timeout` — this bounds the local wait, not the runtime's turn.
 
-### Session format v2
+### Session format
 
-The runtime's `session.event` vocabulary is **session format v2** (no wire
-change). The crate documents the v2 vocabulary and keeps event payloads
-untyped, so the run path is unaffected:
+The crate keeps `session.event` payloads **untyped**, so upstream
+session-format advances (v2 … v4) pass through without touching the run
+path. The v2 transition is kept below as a historical record of one such
+advance:
 
-- `assistant/message` now carries an embedded
-  `stream: AssistantStreamRecord[]`;
+- `assistant/message` carries an embedded `stream: AssistantStreamRecord[]`;
 - `assistant/attempt` was added;
 - `assistant/chunk` was removed — the crate does not claim `assistant/chunk`
-  support and does not parse the embedded v2 stream (non-goal).
+  support and does not parse the embedded stream (non-goal).
+
+Test-locking is scoped to exactly two v4 shapes: the flattened
+`tool/result` event (a flat `role: "tool"` message) and the
+`developer/message` passthrough — both locked as verbatim passthrough in
+the crate's run-semantics suite.
 
 ### Content block vocabulary
 

@@ -72,7 +72,7 @@ Normative rules:
 
 ### 5.1 The six variants (normative)
 
-`ContentBlockMap` has **six** members — `text`, `reasoning`, `image`, `file`, `tool-call`, `tool-result` (`packages/llm/llm/src/types.ts:112-118`). The crate MUST model all six as typed variants:
+`ContentBlockMap` has **six** members — `text`, `reasoning`, `image`, `file`, `tool-call`, `tool-result` (`packages/llm/llm/src/types.ts:112-118`, frozen basis `c389f96bf3`). The crate MUST model all six as typed variants — a crate rule that stays normative even though the upstream map has since drifted (§5.1.1):
 
 | Variant | Shape | Upstream evidence |
 |---|---|---|
@@ -86,6 +86,16 @@ Normative rules:
 `FileAttachmentRef` MUST be `{attachmentId, name, bytes}` (`packages/attachment/attachment/src/types.ts:39-46`).
 
 `ImageAttachmentRef` MUST be `{attachmentId, mediaType, bytes, width, height, name?, originalDimensions?}` where `originalDimensions?: {width, height}` (`packages/attachment/attachment/src/types.ts:11-34`). `originalDimensions` is present only when normalization reduced the image (`packages/attachment/attachment/src/types.ts:24-31`); the crate MUST model it so that parse → serialize round-trips without loss (Track B F-4: re-serializing a parsed image block currently drops it).
+
+#### 5.1.1 Drift amendment (2026-09-24): `ContentBlockMap` at `dsh-v0.1.7-rc.1`
+
+Re-verification at tag `dsh-v0.1.7-rc.1` (commit `46a7f68b0922371ce7144b668b90e377d8e799f4`, 2026-09-23) found exactly one drifted cluster: the LLM-level `ContentBlockMap`. Upstream facts at that tag (all citations `path:line` at the tag):
+
+- `ContentBlockMap` (`packages/llm/llm/src/types.ts:138-146`) has **seven** members: `text`, `reasoning`, `image`, `file`, `tool-call`, `tool-addition` (`types.ts:115-124`), `tool-removal` (`types.ts:127-130`). `tool-result` is no longer a member, and `ToolResultBlock` is deleted (no occurrence under `packages/llm`). The two new developer tool-change blocks are "reserved for Session V4 persistence; providers and UI reject them until their producers and consumers are implemented together" (map doc comment, `types.ts:132-137`).
+- Tool results moved from a content-block `type` to a **message role**: `createToolResultMessage` produces `role: 'tool'` messages carrying `toolCallId`, `content: readonly ContentBlock[]`, and message-level `isError` (`packages/llm/llm/src/message.ts:287-305`). The old `{type, toolCallId, content, isError}` block shape still appears in SDK-client wire fixtures (`packages/sdk/client/tests/sdk-client.spec.ts:141`) and as a retired nested-block rejection case in provider serialization tests (`packages/llm/llm-deepseek/tests/serialize.spec.ts:453`).
+- `ImageBlock` gained an optional `offloaded?: true` (`packages/llm/llm/src/types.ts:88`) — a merge-extensible addition.
+
+**Crate divergence (normative).** The crate's surface is unchanged and remains normative as it stands: `ContentBlock` (`src/protocol.rs:35-78`) keeps its **six typed variants plus the `Unknown` passthrough**. Unknown upstream kinds — `tool-addition`, `tool-removal`, and any future map member — MUST degrade to `ContentBlock::Unknown(Value)` verbatim, per §1's unknown-tolerant rule and §5.2's escape hatch. `ContentBlock::ToolResult` stays a typed variant (the block shape survives in wire fixtures, and message-level tool-result `content` is still `ContentBlock[]`). `ImageBlock.offloaded` is not modeled (unknown fields on a known block are ignored per §5.2). This is peer-parity with the Python baseline, which is untyped at this level. A contributor MUST NOT "fix" the crate toward the upstream map — adding `tool-addition` / `tool-removal` variants, removing `ToolResult`, or modeling `offloaded` — without a superseding spec decision (PM decision 2026-09-24, plan `11-dsh-0.1.7-rc1-realignment`).
 
 ### 5.2 `file` is an addition, not a replacement
 
@@ -102,6 +112,10 @@ The rustdoc "known variants" count MUST say six, not five.
 - `assistant/chunk` was removed.
 
 Because the crate keeps `session.event.event` untyped (§3.2), the run path is unaffected: `final_response` keeps the reversed-scan derivation of §6.2, and `finish_reason` reads the last root `turn/end`'s `data.reason.kind`. The crate MUST NOT claim `assistant/chunk` support and MUST NOT parse the embedded v2 stream (non-goal). Documentation MUST state the v2 vocabulary.
+
+#### 5.3.1 Supersession amendment (2026-09-24): `SESSION_FORMAT_VERSION` at `dsh-v0.1.7-rc.1`
+
+The frozen statement above records the frozen basis and is correct there: `SESSION_FORMAT_VERSION = 2` at `c389f96bf3` (`packages/core/session/src/types.ts:86`, re-observed 2026-09-24). The fact is superseded within the studied range `dsh-v0.1.5-rc.2 → dsh-v0.1.7-rc.1`: the constant is **3** at `dsh-v0.1.5-rc.2` (`types.ts:88` at that tag) and **4** at `dsh-v0.1.7-rc.1` (`types.ts:89` at the baseline tag) — a one-way upgrade: the version is "a single monotonic integer", historical generations are translated forward on read, and there is no version negotiation (constant doc comment `packages/core/session/src/types.ts:68-89`; header translation `:93`; both at the baseline tag). No crate rule in §5.3 changes: `session.event.event` stays opaque (§3.2), so the advance to V4 alters no wire or parsing obligation and the run path is unaffected exactly as stated above; the MUST NOT rules (no `assistant/chunk` claim, no embedded-stream parsing) apply to every generation. Evidence: plan `11-dsh-0.1.7-rc1-realignment` Task 1 report (`.mstar/sdd/11-dsh-0.1.7-rc1-realignment/task-1-report.md`) plus pinned-ref re-observation of both anchors on 2026-09-24 (`git show <tag>:packages/core/session/src/types.ts` → `SESSION_FORMAT_VERSION` 3 at `dsh-v0.1.5-rc.2`, 4 at `dsh-v0.1.7-rc.1`); §5.1.1 records the matching "reserved for Session V4 persistence" note. (Amendment 2026-09-24, plan `11-dsh-0.1.7-rc1-realignment`, QC finding F-002.)
 
 ---
 
@@ -269,4 +283,14 @@ A change to this contract MUST be verifiable by:
 
 Rust-side paths (`src/protocol.rs`, `src/api.rs`, `src/client/`) are cited at the v0.1 tree as the current state this contract amends.
 
-Re-verification rule: if upstream advances past `c389f96bf3`, re-run the greps behind §2, §3, §5.1, and §6.3 against the new ref before restating any line here. A moved line number is not a contract change; a changed rule is.
+Drift-amendment citations (upstream @ `dsh-v0.1.7-rc.1` = `46a7f68b0922371ce7144b668b90e377d8e799f4`, recorded 2026-09-24 — §5.1.1 and §5.3.1; every other row above stays frozen at `c389f96bf3`):
+
+| Path | Lines used |
+|---|---|
+| `packages/llm/llm/src/types.ts` | 79-89, 115-124, 127-130, 132-137, 138-146 |
+| `packages/llm/llm/src/message.ts` | 287-305 |
+| `packages/core/session/src/types.ts` | 68-89, 93 |
+| `packages/sdk/client/tests/sdk-client.spec.ts` | 141 |
+| `packages/llm/llm-deepseek/tests/serialize.spec.ts` | 453 |
+
+Re-verification rule: if upstream advances past `c389f96bf3`, re-run the greps behind §2, §3, §5.1, §5.3, and §6.3 against the new ref before restating any line here. A moved line number is not a contract change; a changed rule is. §5.1 was re-verified 2026-09-24 at `dsh-v0.1.7-rc.1`; the §5.1 greps are green at that ref with these expected outputs: `ContentBlockMap` at `packages/llm/llm/src/types.ts:138-146` with the seven members of §5.1.1; no `tool-result` map member and no `ToolResultBlock` anywhere under `packages/llm`; tool results as message-level `role: 'tool'` at `packages/llm/llm/src/message.ts:287-305`; `ImageBlock.offloaded?: true` at `packages/llm/llm/src/types.ts:88`. §5.3's version fact was re-verified the same day at the same ref (supersession §5.3.1); its grep — `git show <ref>:packages/core/session/src/types.ts | grep -n "SESSION_FORMAT_VERSION"` — returns the expected superseded value: `SESSION_FORMAT_VERSION = 4` at `packages/core/session/src/types.ts:89` (2 at the frozen basis `c389f96bf3` `:86`; 3 at `dsh-v0.1.5-rc.2` `:88`). The remaining §2/§3/§6.3 inventory rows re-ran green at the same ref (moved line numbers only, no changed rules; the protocol package is byte-identical across `dsh-v0.1.5-rc.2` → `dsh-v0.1.7-rc.1`).
