@@ -19,8 +19,11 @@ Harness-subtree contract for this repository. Full rules live in the `mstar-*` s
 | `{ITERATION_DIR}` | `.mstar/iterations/` | no (process-local) |
 | `{KNOWLEDGE_DIR}` | `.mstar/knowledge/` | yes (results) |
 | `{SPECS_DIR}` | `.mstar/specs/` (default; fallback `docs/specs/`, root `specs/`) | yes (results) |
+| `{WORKFLOW_DIR}` | `.mstar/workflows/` | no (process-local) |
+| `{PROJECT_DIR}` | `.mstar/projects/` | no (process-local) |
+| `{HARNESS_DIR}/store.db` | ACTIVE execution authority (root register, workflow/plan rows) + issue/catalog/roadmap/milestone store | no (process-local) |
 
-Resolution rules (find-first, never above workspace root) and the empty-dir rule: `mstar-plan-conventions` skill.
+Resolution rules (find-first, never above workspace root) and the empty-dir rule: `mstar-conventions` skill.
 
 ## Content Boundaries
 
@@ -31,12 +34,14 @@ Resolution rules (find-first, never above workspace root) and the empty-dir rule
 | `{ITERATION_DIR}` | Iteration packages (compass + guides/specs) |
 | `{KNOWLEDGE_DIR}` | Implementation SSOT, reusable design |
 | `{PLAN_DIR}/` | Main plans, durable gate summaries, optional residual prose |
+| `{PROJECT_DIR}/<id>/` | Project layer: `references/` research corpus; `roadmap.md` / `residuals.json` are legacy migration/history files only |
+| `archived/` | Retained local history (retired legacy sources, store-migration archives) |
 
-QC/QA raw process reports go to `{SDD_DIR}/review/` (gitignored), **not** `docs/` or `{PLAN_DIR}`. Open residual state is SSOT in `status.json`, not in plan prose.
+QC/QA raw process reports go to `{SDD_DIR}/review/` (gitignored), **not** `docs/` or `{PLAN_DIR}`. Open findings are issues in `{HARNESS_DIR}/store.db`, never plan prose.
 
 ## State Machine & Done
 
-`Todo → InProgress → InReview → Done | Blocked` — `Done` may only be set by `project-manager` or `qa-engineer`. Implement roles may set `InReview`, never `Done`. `status.json` is the durable SSOT for plans, residuals, and metadata.
+`Todo → InProgress → InReview → Done | Blocked` — `Done` may only be set by `project-manager` or `qa-engineer`. Implement roles may set `InReview`, never `Done`. Execution state is SSOT in `.mstar/store.db` (`execution_*` rows, driven through the ordinary `mstar plan` / `mstar workflow` operations); `status.json` and `workflows/<id>/snapshot.json` are migration sources / retained history and are never a live execution route.
 
 ## QC / QA Alignment
 
@@ -44,25 +49,18 @@ QC/QA raw process reports go to `{SDD_DIR}/review/` (gitignored), **not** `docs/
 - `inline` (hotfix) ⇒ single-seat QC (`{SDD_DIR}/review/qc.md`).
 - Runtime/behavior changes require a recorded `QA gate` decision (`mandatory` or `pm-acceptance` per `qa-trigger-matrix.md`).
 
-## Residual Lifecycle
+## Findings / Issues
 
-- Open residuals: root `status.json` → `residual_findings[<plan_id>]` (severity enum: critical/warning/suggestion; canonical strings from `mstar-plan-artifacts`).
-- Closed residuals: archived to `{HARNESS_DIR}/archived/residuals/<plan-id>.json`.
-- Residual prose may also live in the main plan, but `status.json` is the SSOT.
-
-## Plan Compaction Profile
-
-This repository uses **Profile A** from the Morning Star `mstar-plan-artifacts` skill (`references/done-compaction.md`).
-
-- `status.json.plans[]` keeps active plans and may keep **slim `Done` rows**.
-- `archived/plans/<plan-id>.json` is used as cold snapshot when available.
-- Historical tooling may read both `status.json.plans[]` and `archived/plans/`.
+- A confirmed finding is captured as an issue in `{HARNESS_DIR}/store.db` — plan-scoped `mstar plan issue-add`, unscoped `mstar issue add`; a recurrence appends an occurrence, never a second issue.
+- Closure is a separate authorized act by the closure authority: `mstar issue close | waive | duplicate | supersede`, plan-scoped `mstar plan issue-close`.
+- `projects/<id>/residuals.json` is migration history: never a write target, never dual-written.
+- `severity` is a machine enum (`mstar-artifacts` is the SSOT); QC report section titles (Critical / Warning / Suggestion) are not severity values.
 
 ## Git Tracking Policy (process vs results)
 
 Principle: **process stays local, results are shared.**
 
 - Tracked: `AGENTS.md` (this file), `knowledge/**`, `specs/**`.
-- Gitignored (local session SSOT): `plans/`, `iterations/`, `sdd/`, `status.json`, `notes.json`, `archived/`.
-- Cross-clone handoff happens via knowledge + specs + this file + root `AGENTS.md` — never by committing `status.json` or `plans/` by default.
+- Gitignored (process-local): `store.db`, `plans/`, `iterations/`, `sdd/`, `workflows/`, `projects/`, `archived/`, and the retired migration sources `status.json` / `workflows/<id>/snapshot.json`.
+- Cross-clone handoff happens via knowledge + specs + this file + root `AGENTS.md` — never by committing `status.json`, `plans/`, or `store.db`.
 - Default working style: feature branches (see root `AGENTS.md`); branch/worktree/QC-checkout alignment: `mstar-branch-worktree` skill.
