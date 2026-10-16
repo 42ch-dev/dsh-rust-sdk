@@ -23,6 +23,9 @@ target
 # Local feature worktrees (Morning Star Phase 2)
 .worktrees/
 
+# Local tooling scratch (omp video-agent plugin root)
+.video_agent/
+
 # Morning Star harness (.mstar/)
 # Principle: process stays local; results are shared with the team.
 # Default-ignore everything under .mstar/, then re-include the tracked results.
