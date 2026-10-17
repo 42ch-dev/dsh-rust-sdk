@@ -257,10 +257,7 @@ pub async fn run(
 且附加的（传 `None` 与普通 run 路径行为完全一致）。回调内 panic 属调用方
 缺陷，会向外传播；crate 不会吞掉它。
 
-两段等待——等回执与等 idle——都是**无界**的（Python 对齐）；只有
-`session/prompt` 请求受 `Config::request_timeout` 约束。需要边界的调用方
-请用 `tokio::time::timeout` 包住该调用——这只约束本地等待，不约束运行时
-侧的执行。
+两段等待——等回执与等 idle——都是**无界**的（Python 对齐）。crate 发出的每个请求都受所配置的超时约束（`session/prompt` 与下文的会话生命周期包装方法受 `Config::request_timeout` 约束；`initialize` 受 `Config::initialize_timeout` 约束），但两段等待本身不受约束。需要为等待设置边界的调用方请用 `tokio::time::timeout` 包住该调用——这只约束本地等待，不约束运行时侧的执行。
 
 ### 会话生命周期与工作目录
 

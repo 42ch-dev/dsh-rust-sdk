@@ -288,9 +288,11 @@ path). A panic inside the callback is a caller bug and propagates; the crate
 does not swallow it.
 
 Both waits — the receipt wait and the idle wait — are **unbounded** (Python
-parity); only the `session/prompt` request is bounded by
-`Config::request_timeout`. Callers needing a bound wrap the call in
-`tokio::time::timeout` — this bounds the local wait, not the runtime's turn.
+parity). Every request the crate sends is bounded by a configured timeout
+(`session/prompt` and the session-lifecycle wrappers below by
+`Config::request_timeout`; `initialize` by `Config::initialize_timeout`), but
+the waits themselves are not. Callers needing a bound on a wait wrap the call
+in `tokio::time::timeout` — this bounds the local wait, not the runtime's turn.
 
 ### Session lifecycle and working directory
 
