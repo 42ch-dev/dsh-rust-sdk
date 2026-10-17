@@ -105,7 +105,8 @@ pub use protocol::{
     ContentBlock, Dimensions, FileAttachmentRef, ImageAttachmentRef, IncomingFrame,
     IncomingRequest, InitializeParams, InitializeResult, JsonRpcErrorBody, JsonRpcId,
     JsonRpcResponse, JsonRpcResponseOutcome, Notification, ServerInfo, SessionEventNotification,
-    SessionPromptParams, SessionPromptResult, SessionStatusNotification,
+    SessionPromptParams, SessionPromptResult, SessionResumeParams, SessionStatusNotification,
+    SessionWorkingDirectoryParams, SessionWorkingDirectoryResult, SessionWorkingDirectorySetParams,
     SubagentFinishedNotification, SubagentStartedNotification,
 };
 pub use runtime::Config;

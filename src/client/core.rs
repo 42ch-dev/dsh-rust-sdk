@@ -17,6 +17,8 @@ use uuid::Uuid;
 use crate::error::Error;
 use crate::protocol::{
     ContentBlock, InitializeParams, InitializeResult, SessionPromptParams, SessionPromptResult,
+    SessionResumeParams, SessionWorkingDirectoryParams, SessionWorkingDirectoryResult,
+    SessionWorkingDirectorySetParams,
 };
 use crate::transport::{write_frame, JsonRpcLineTransport};
 
@@ -491,6 +493,80 @@ impl HarnessClient {
                 message: format!("session/prompt returned no message id: {err}"),
             })?;
         Ok(prompt.message_id)
+    }
+
+    /// Restore a persisted session, repairing an interrupted final turn.
+    ///
+    /// Upstream `session/resume` (`packages/sdk/server/src/server.ts` at
+    /// `dsh-v0.2.1-rc.1`): the session's stored identity and directory are
+    /// kept and no replacement is ever created; a missing, unreadable, or
+    /// already-open/opening session is an error response — surfaced here as
+    /// [`Error::JsonRpc`], not a transport failure. The result body is
+    /// `Record<string, never>`, so it is never parsed: `{}` is success.
+    pub async fn resume_session(&mut self, session_id: impl Into<String>) -> Result<(), Error> {
+        let params = SessionResumeParams {
+            session_id: session_id.into(),
+        };
+        self.request("session/resume", Some(serde_json::to_value(params)?))
+            .await?;
+        Ok(())
+    }
+
+    /// Read a session's effective working directory.
+    ///
+    /// Upstream `session/working-directory/get`
+    /// (`packages/sdk/server/src/server.ts` at `dsh-v0.2.1-rc.1`): an
+    /// unknown session id creates the Session, a missing directory is
+    /// recovered to its origin, and the validated absolute directory is
+    /// returned as `{cwd}`. A response without that string is a protocol
+    /// error.
+    pub async fn get_working_directory(
+        &mut self,
+        session_id: impl Into<String>,
+    ) -> Result<String, Error> {
+        let params = SessionWorkingDirectoryParams {
+            session_id: session_id.into(),
+        };
+        let result = self
+            .request(
+                "session/working-directory/get",
+                Some(serde_json::to_value(params)?),
+            )
+            .await?;
+        let directory: SessionWorkingDirectoryResult =
+            serde_json::from_value(result).map_err(|err| Error::SdkProtocol {
+                message: format!("session/working-directory/get returned no cwd: {err}"),
+            })?;
+        Ok(directory.cwd)
+    }
+
+    /// Change a session's working directory and return the validated result.
+    ///
+    /// Upstream `session/working-directory/set`
+    /// (`packages/sdk/server/src/server.ts` at `dsh-v0.2.1-rc.1`): a
+    /// relative `path` resolves against the Session's current directory; the
+    /// session origin and permissions are unchanged. Returns the validated
+    /// absolute directory carried as `{cwd}`.
+    pub async fn set_working_directory(
+        &mut self,
+        session_id: impl Into<String>,
+        path: impl Into<String>,
+    ) -> Result<String, Error> {
+        let params = SessionWorkingDirectorySetParams {
+            session_id: session_id.into(),
+            path: path.into(),
+        };
+        let result = self
+            .request(
+                "session/working-directory/set",
+                Some(serde_json::to_value(params)?),
+            )
+            .await?;
+        let directory: SessionWorkingDirectoryResult =
+            serde_json::from_value(result).map_err(|err| Error::SdkProtocol {
+                message: format!("session/working-directory/set returned no cwd: {err}"),
+            })?;
+        Ok(directory.cwd)
     }
 
     /// Subscribe to the notifications of one session and its descendants.

@@ -195,6 +195,55 @@ pub struct SessionPromptResult {
     pub message_id: String,
 }
 
+/// Parameters for `session/resume`.
+///
+/// Upstream `packages/sdk/protocol/src/types.ts` at `dsh-v0.2.1-rc.1`:
+/// `SessionResumeParams { sessionId }`. Dispatch validation requires a
+/// non-empty id.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionResumeParams {
+    /// The SDK-side session id of the persisted session to restore.
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+}
+
+/// Parameters for `session/working-directory/get`.
+///
+/// Upstream `packages/sdk/protocol/src/types.ts` at `dsh-v0.2.1-rc.1`:
+/// `SessionWorkingDirectoryParams { sessionId }`. An unknown id creates the
+/// session.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionWorkingDirectoryParams {
+    /// The SDK-side session id whose effective directory is read.
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+}
+
+/// Parameters for `session/working-directory/set`.
+///
+/// Upstream `packages/sdk/protocol/src/types.ts` at `dsh-v0.2.1-rc.1`:
+/// `SessionWorkingDirectorySetParams { sessionId, path }`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionWorkingDirectorySetParams {
+    /// The SDK-side session id whose working directory changes.
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+    /// The new directory; a relative path resolves against the session's
+    /// current directory.
+    pub path: String,
+}
+
+/// Result of `session/working-directory/get|set`.
+///
+/// Upstream `packages/sdk/protocol/src/types.ts` at `dsh-v0.2.1-rc.1`:
+/// `SessionWorkingDirectoryResult { cwd }` — the validated absolute
+/// effective directory.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionWorkingDirectoryResult {
+    /// The validated absolute effective working directory.
+    pub cwd: String,
+}
+
 /// A JSON-RPC request id as received from the server: a string or a number.
 ///
 /// Outgoing client request ids are always uuid-v4 strings (matching both
@@ -638,6 +687,39 @@ mod tests {
             message_id: "m1".into(),
         };
         assert_round_trip(&result, r#"{"messageId":"m1"}"#);
+    }
+
+    #[test]
+    fn session_resume_params_round_trip() {
+        let params = SessionResumeParams {
+            session_id: "s1".into(),
+        };
+        assert_round_trip(&params, r#"{"sessionId":"s1"}"#);
+    }
+
+    #[test]
+    fn session_working_directory_params_round_trip() {
+        let params = SessionWorkingDirectoryParams {
+            session_id: "s1".into(),
+        };
+        assert_round_trip(&params, r#"{"sessionId":"s1"}"#);
+    }
+
+    #[test]
+    fn session_working_directory_set_params_round_trip() {
+        let params = SessionWorkingDirectorySetParams {
+            session_id: "s1".into(),
+            path: "sub".into(),
+        };
+        assert_round_trip(&params, r#"{"sessionId":"s1","path":"sub"}"#);
+    }
+
+    #[test]
+    fn session_working_directory_result_round_trip() {
+        let result = SessionWorkingDirectoryResult {
+            cwd: "/work/tree".into(),
+        };
+        assert_round_trip(&result, r#"{"cwd":"/work/tree"}"#);
     }
 
     #[test]
