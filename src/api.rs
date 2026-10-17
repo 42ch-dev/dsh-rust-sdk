@@ -164,6 +164,35 @@ impl DeepSeekHarness {
             session_id,
         }
     }
+
+    /// Restore a persisted session and return a handle bound to its id —
+    /// Python `DeepSeekHarness.resume_session` parity.
+    ///
+    /// Upstream `session/resume` (`packages/sdk/server/src/server.ts` at
+    /// `dsh-v0.2.1-rc.1`) keeps the stored session identity and directory,
+    /// repairs an interrupted final turn without sending input, and never
+    /// creates a replacement; a missing, unreadable, or already-open/opening
+    /// session is a JSON-RPC error (surfaced as [`Error::JsonRpc`]).
+    ///
+    /// The runtime's empty ack carries nothing to parse, so a successful
+    /// call yields a [`Session`] handle: no local id validation is applied
+    /// (upstream rejects an empty id with a `TypeError`; this crate's
+    /// [`DeepSeekHarness::start_session`] does not validate a caller-supplied
+    /// id either, and the runtime's own dispatch validation answers an empty
+    /// id as a JSON-RPC error).
+    pub async fn resume_session(
+        &self,
+        session_id: impl Into<String>,
+    ) -> Result<Session<'_>, Error> {
+        let session_id = session_id.into();
+        // Lock, send, release: the handle borrows the harness, never the
+        // client guard.
+        self.client.lock().await.resume_session(&session_id).await?;
+        Ok(Session {
+            harness: self,
+            session_id,
+        })
+    }
 }
 
 /// One SDK session bound to a [`DeepSeekHarness`], Python `Session` parity.
@@ -400,6 +429,39 @@ impl Session<'_> {
             events,
             notifications,
         })
+    }
+
+    /// Read this session's effective working directory — Python
+    /// `Session.get_working_directory` parity.
+    ///
+    /// Upstream `session/working-directory/get`
+    /// (`packages/sdk/server/src/server.ts` at `dsh-v0.2.1-rc.1`): an
+    /// unknown session id creates the Session, a missing directory is
+    /// recovered to its origin, and the validated absolute directory is
+    /// returned. A response without a `cwd` string is [`Error::SdkProtocol`].
+    pub async fn get_working_directory(&self) -> Result<String, Error> {
+        self.harness
+            .client
+            .lock()
+            .await
+            .get_working_directory(&self.session_id)
+            .await
+    }
+
+    /// Change this session's working directory and return the validated
+    /// absolute result — Python `Session.set_working_directory` parity.
+    ///
+    /// Upstream `session/working-directory/set`
+    /// (`packages/sdk/server/src/server.ts` at `dsh-v0.2.1-rc.1`): a relative
+    /// `path` resolves against the Session's current directory; the session
+    /// origin and permissions are unchanged.
+    pub async fn set_working_directory(&self, path: impl Into<String>) -> Result<String, Error> {
+        self.harness
+            .client
+            .lock()
+            .await
+            .set_working_directory(&self.session_id, path)
+            .await
     }
 }
 

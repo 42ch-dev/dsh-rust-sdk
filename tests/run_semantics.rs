@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use common::fake_runtime::{
     emit, exit, expect, expect_params, harness_config, respond, respond_error, run_prefix,
-    server_info_result, Directive,
+    server_info_result, Directive, FakeRuntime,
 };
 
 /// The canonical session ids for the run-semantics scenarios.
@@ -1190,4 +1190,187 @@ async fn v4_developer_message_event_passes_through_verbatim() {
     // still own final_response/finish_reason despite the new event type.
     assert_eq!(result.final_response, "after the developer note");
     assert_eq!(result.finish_reason.as_deref(), Some("completed"));
+}
+
+// --- Wire capability wrappers: `session/resume` + working-directory get/set ---
+//
+// The method strings and params keys are the upstream `dsh-v0.2.1-rc.1`
+// literals (`packages/sdk/protocol/src/types.ts`); the payloads below lock
+// them on the wire for both the low-level `HarnessClient` methods and the
+// Python-parity `DeepSeekHarness` / `Session` wrappers.
+
+/// Spawn the fake-runtime peer for one low-level [`HarnessClient`] scenario.
+fn fake_client(script: &[Directive]) -> FakeRuntime {
+    FakeRuntime::spawn(script).expect("spawn the fake-runtime peer")
+}
+
+#[tokio::test]
+async fn resume_session_emits_the_wire_request_and_accepts_the_empty_result() {
+    // `session/resume` answers `Record<string, never>`: the wrapper never
+    // parses the result body, so `{}` is success.
+    let script = [
+        expect_params("session/resume", json!({"sessionId": "s-1"})),
+        respond(json!({})),
+        exit(0),
+    ];
+    let mut runtime = fake_client(&script);
+    runtime
+        .client
+        .resume_session("s-1")
+        .await
+        .expect("an empty result object is success");
+}
+
+#[tokio::test]
+async fn resume_session_propagates_a_json_rpc_error() {
+    // A missing, unreadable, or already-open session is an error response,
+    // not a transport failure: it must surface as `Error::JsonRpc`.
+    let script = [
+        expect("session/resume"),
+        respond_error(-32000, "unknown SDK session", None),
+        exit(0),
+    ];
+    let mut runtime = fake_client(&script);
+    match runtime
+        .client
+        .resume_session("s-2")
+        .await
+        .expect_err("a JSON-RPC error must propagate")
+    {
+        Error::JsonRpc {
+            code,
+            message,
+            data,
+        } => {
+            assert_eq!(code, Some(-32000));
+            assert_eq!(message, "unknown SDK session");
+            assert_eq!(data, None);
+        }
+        other => panic!("expected JsonRpc, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn working_directory_get_emits_the_wire_request_and_returns_the_cwd() {
+    let script = [
+        expect_params("session/working-directory/get", json!({"sessionId": "s-3"})),
+        respond(json!({"cwd": "/work/tree"})),
+        exit(0),
+    ];
+    let mut runtime = fake_client(&script);
+    let cwd = runtime
+        .client
+        .get_working_directory("s-3")
+        .await
+        .expect("get succeeds");
+    assert_eq!(cwd, "/work/tree");
+}
+
+#[tokio::test]
+async fn working_directory_set_carries_the_path_and_returns_the_validated_cwd() {
+    let script = [
+        expect_params(
+            "session/working-directory/set",
+            json!({"sessionId": "s-4", "path": "sub/dir"}),
+        ),
+        respond(json!({"cwd": "/work/tree/sub/dir"})),
+        exit(0),
+    ];
+    let mut runtime = fake_client(&script);
+    let cwd = runtime
+        .client
+        .set_working_directory("s-4", "sub/dir")
+        .await
+        .expect("set succeeds");
+    assert_eq!(cwd, "/work/tree/sub/dir");
+}
+
+#[tokio::test]
+async fn working_directory_shape_mismatch_is_sdk_protocol_naming_the_method() {
+    // Both methods read `{cwd}`; a response without that string must fail
+    // with `Error::SdkProtocol` naming the method (the `session_prompt`
+    // convention), never with a silently empty directory.
+    let get_script = [
+        expect("session/working-directory/get"),
+        respond(json!({"directory": "/work/tree"})),
+        exit(0),
+    ];
+    let mut get_runtime = fake_client(&get_script);
+    match get_runtime
+        .client
+        .get_working_directory("s-5")
+        .await
+        .expect_err("a missing cwd must fail")
+    {
+        Error::SdkProtocol { message } => assert!(
+            message.contains("session/working-directory/get"),
+            "the error must name the method: {message}"
+        ),
+        other => panic!("expected SdkProtocol, got {other:?}"),
+    }
+
+    let set_script = [
+        expect("session/working-directory/set"),
+        respond(json!({"directory": "/work/tree"})),
+        exit(0),
+    ];
+    let mut set_runtime = fake_client(&set_script);
+    match set_runtime
+        .client
+        .set_working_directory("s-5", "sub")
+        .await
+        .expect_err("a missing cwd must fail")
+    {
+        Error::SdkProtocol { message } => assert!(
+            message.contains("session/working-directory/set"),
+            "the error must name the method: {message}"
+        ),
+        other => panic!("expected SdkProtocol, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn resume_session_returns_a_handle_bound_to_the_resumed_id() {
+    // The returned `Session` must carry the resumed id: the working-directory
+    // wrappers are asserted on the wire with that exact `sessionId`.
+    let script = [
+        expect_params(
+            "initialize",
+            json!({"provider": "deepseek-official", "model": "deepseek-v4-flash"}),
+        ),
+        respond(server_info_result()),
+        expect_params("session/resume", json!({"sessionId": ROOT_SESSION})),
+        respond(json!({})),
+        expect_params(
+            "session/working-directory/get",
+            json!({"sessionId": ROOT_SESSION}),
+        ),
+        respond(json!({"cwd": "/work/tree"})),
+        expect_params(
+            "session/working-directory/set",
+            json!({"sessionId": ROOT_SESSION, "path": "sub"}),
+        ),
+        respond(json!({"cwd": "/work/tree/sub"})),
+        exit(0),
+    ];
+    let mut h = harness(&script).await;
+    let session = h
+        .resume_session(ROOT_SESSION)
+        .await
+        .expect("resume succeeds");
+    assert_eq!(
+        session
+            .get_working_directory()
+            .await
+            .expect("get delegates to the client"),
+        "/work/tree"
+    );
+    assert_eq!(
+        session
+            .set_working_directory("sub")
+            .await
+            .expect("set delegates to the client"),
+        "/work/tree/sub"
+    );
+    h.close().await.expect("clean close");
 }

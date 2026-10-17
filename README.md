@@ -84,9 +84,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 `DeepSeekHarness::start` is eager: it resolves the runtime, resolves (and
 creates) the harness home, spawns the subprocess, and completes the
 `initialize` handshake before returning. The runtime inherits
-`DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` from the environment unless the
-crate injects overrides, so callers can use real model endpoints directly or
-point those variables at a local proxy.
+`DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` from the environment, and a
+configured `Config::base_url` / `Config::api_key` is injected under those
+names, so callers can use real model endpoints directly or point those
+variables at a local proxy. Whether the injected value outranks a stored
+credential is **unverified** — see
+[Environment variables](#environment-variables).
 
 ## Runtime acquisition
 
@@ -285,9 +288,30 @@ path). A panic inside the callback is a caller bug and propagates; the crate
 does not swallow it.
 
 Both waits — the receipt wait and the idle wait — are **unbounded** (Python
-parity); only the `session/prompt` request is bounded by
-`Config::request_timeout`. Callers needing a bound wrap the call in
-`tokio::time::timeout` — this bounds the local wait, not the runtime's turn.
+parity). Every request the crate sends is bounded by a configured timeout
+(`session/prompt` and the session-lifecycle wrappers below by
+`Config::request_timeout`; `initialize` by `Config::initialize_timeout`), but
+the waits themselves are not. Callers needing a bound on a wait wrap the call
+in `tokio::time::timeout` — this bounds the local wait, not the runtime's turn.
+
+### Session lifecycle and working directory
+
+Three more Python-parity wrappers sit beside `run`:
+
+- `DeepSeekHarness::resume_session(session_id)` restores a persisted session
+  and returns a `Session` handle bound to the same id. Upstream keeps the
+  stored session identity and directory and repairs an interrupted final turn,
+  **without sending input**; a missing, unreadable, or already-open/opening
+  session is a JSON-RPC error (`Error::JsonRpc`) — a rejected restore, never
+  a freshly created replacement.
+- `Session::get_working_directory()` returns the session's effective absolute
+  directory. Upstream **creates the session when the id is unknown to it**,
+  recovers a missing directory to its origin, and returns the validated
+  result; a response without the `cwd` string is `Error::SdkProtocol`.
+- `Session::set_working_directory(path)` changes that directory and returns
+  the validated absolute result on the same terms. A relative `path` resolves
+  against the session's current directory; the session origin and permissions
+  are unchanged.
 
 ### Session format
 
@@ -403,8 +427,19 @@ never post-resolution overridden:
 |---|---|---|
 | `DSH_HOME` | Harness home (child env) | Always written with the resolved absolute, `~`-expanded home. The caller's value is an **input to resolution** (`Config::dsh_home` → non-empty `DSH_HOME` → `~/.dsh`), not a post-resolution override; read the selection back via `Config::resolve_dsh_home` / `DeepSeekHarness::dsh_home` |
 | `DSH_RUNTIME_BIN` | Runtime binary resolution | Consulted when `Config::dsh_bin` is not set; empty counts as absent. Explicitly preserved after the `runtime_bin` → `dsh_bin` rename (not a compatibility shim) |
-| `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` | Model endpoint and credentials | Inherited as-is; overridden when `Config::base_url` / `Config::api_key` is configured, and a caller-supplied `Config::env` entry for either key is applied after injection and wins on collision |
+| `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` | Model endpoint and credentials | Inherited as-is; overridden when `Config::base_url` / `Config::api_key` is configured, and a caller-supplied `Config::env` entry for either key is applied after injection and wins on collision. This describes the child environment only — whether the injected value outranks a stored credential is unverified (see the note below) |
 | `DSH_CORDIS_CONFIG` / `DSH_SESSION_ROOT` / `DSH_CWD` | Removed — never written | No reader upstream; see the [removal table](#removed-surface-v01--current) |
+
+**Credential precedence is unverified.** A configured `Config::api_key` (and
+`Config::base_url`) is injected as `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL`,
+but a stored `$DSH_HOME/.credentials.yaml` entry may take precedence over the
+launch environment in current upstream releases. Which one wins — the
+explicitly injected `DEEPSEEK_API_KEY` or a stored entry — is **not
+verified**: the launch contract records that precedence as derived from an
+upstream report and this interaction as an open question, never as an
+assertion of either outcome
+(`.mstar/specs/dsh-runtime-launch-contract.md` §4.1). Treat the injection as
+a supported input to the runtime, not as an authoritative credential.
 
 ## Deliberate divergences
 

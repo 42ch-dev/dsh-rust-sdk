@@ -78,10 +78,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 `DeepSeekHarness::start` 是急切的：它在返回前完成解析运行时、解析（并在
-缺失时创建）harness 主目录、拉起子进程并完成 `initialize` 握手。除非
-crate 注入了覆盖值，运行时从环境中继承 `DEEPSEEK_BASE_URL` /
-`DEEPSEEK_API_KEY`，因此调用方可以直接使用真实模型端点，或把这些变量
-指向本地代理。
+缺失时创建）harness 主目录、拉起子进程并完成 `initialize` 握手。运行时
+从环境中继承 `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY`，而配置的
+`Config::base_url` / `Config::api_key` 也以这两个名字注入，因此调用方可以
+直接使用真实模型端点，或把这些变量指向本地代理。注入值是否优先于已存储
+的凭据**尚未验证**——见[环境变量](#环境变量)。
 
 ## 运行时获取
 
@@ -256,10 +257,22 @@ pub async fn run(
 且附加的（传 `None` 与普通 run 路径行为完全一致）。回调内 panic 属调用方
 缺陷，会向外传播；crate 不会吞掉它。
 
-两段等待——等回执与等 idle——都是**无界**的（Python 对齐）；只有
-`session/prompt` 请求受 `Config::request_timeout` 约束。需要边界的调用方
-请用 `tokio::time::timeout` 包住该调用——这只约束本地等待，不约束运行时
-侧的执行。
+两段等待——等回执与等 idle——都是**无界**的（Python 对齐）。crate 发出的每个请求都受所配置的超时约束（`session/prompt` 与下文的会话生命周期包装方法受 `Config::request_timeout` 约束；`initialize` 受 `Config::initialize_timeout` 约束），但两段等待本身不受约束。需要为等待设置边界的调用方请用 `tokio::time::timeout` 包住该调用——这只约束本地等待，不约束运行时侧的执行。
+
+### 会话生命周期与工作目录
+
+`run` 之外还有三个 Python 对齐的包装方法：
+
+- `DeepSeekHarness::resume_session(session_id)` 恢复一个已持久化的会话，
+  并返回绑定到同一 id 的 `Session` 句柄。上游保留已存储的会话身份与目录，
+  修复被中断的最后一轮，且**不发送任何输入**；会话缺失、不可读或已打开/
+  正在打开时以 JSON-RPC 错误返回（`Error::JsonRpc`）——这是一次被拒绝的
+  恢复，绝不新建替代会话。
+- `Session::get_working_directory()` 返回该会话的生效绝对目录。上游在 id
+  未知时会**创建该会话**，目录缺失时恢复到其来源，并返回校验后的结果；
+  响应缺少 `cwd` 字符串时报 `Error::SdkProtocol`。
+- `Session::set_working_directory(path)` 以同样的语义修改该目录并返回校验
+  后的绝对结果。相对 `path` 相对于会话当前目录解析；会话来源与权限不变。
 
 ### 会话格式
 
@@ -364,8 +377,16 @@ drop-oldest 语义的广播通道。如果高流量会话树在 SDK 两次读取
 |---|---|---|
 | `DSH_HOME` | harness 主目录（子进程环境） | 始终写入解析后的绝对、`~` 已展开主目录。调用方的值只是**解析输入**（`Config::dsh_home` → 非空 `DSH_HOME` → `~/.dsh`），不是解析后的覆盖；可用 `Config::resolve_dsh_home` / `DeepSeekHarness::dsh_home` 读回所选值 |
 | `DSH_RUNTIME_BIN` | 运行时二进制解析 | 当 `Config::dsh_bin` 未设置时被查阅；空值视为不存在。在 `runtime_bin` → `dsh_bin` 改名后被显式保留（非兼容垫片） |
-| `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` | 模型端点与凭据 | 原样继承；配置了 `Config::base_url` / `Config::api_key` 时注入覆盖值，且调用方在 `Config::env` 中提供的同名条目在注入之后应用，冲突时以调用方为准 |
+| `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` | 模型端点与凭据 | 原样继承；配置了 `Config::base_url` / `Config::api_key` 时注入覆盖值，且调用方在 `Config::env` 中提供的同名条目在注入之后应用，冲突时以调用方为准。这只是子进程环境的内容——注入值是否优先于已存储凭据尚未验证（见下方说明） |
 | `DSH_CORDIS_CONFIG` / `DSH_SESSION_ROOT` / `DSH_CWD` | 已移除——绝不写入 | 上游已无读取方；见[移除表面（v0.1 → 当前）](#移除表面v01--当前) |
+
+**凭据优先级尚未验证。** 配置的 `Config::api_key`（及 `Config::base_url`）
+会以 `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` 注入，但在当前上游版本中，
+`$DSH_HOME/.credentials.yaml` 里已存储的条目**可能优先于**启动环境。究竟是
+显式注入的 `DEEPSEEK_API_KEY` 生效，还是已存储条目生效，**未经验证**：启动
+契约把该优先级记录为源自上游报告，并把这一交互列为开放问题，从未断言任一
+结果（`.mstar/specs/dsh-runtime-launch-contract.md` §4.1）。请把注入视为
+运行时的一个受支持输入，而非权威凭据。
 
 ## 刻意分歧
 
