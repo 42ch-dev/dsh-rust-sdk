@@ -36,6 +36,12 @@
 //! writes `DSH_CORDIS_CONFIG`, `DSH_SESSION_ROOT`, or `DSH_CWD` — none has
 //! a reader upstream (spec §4.2).
 //!
+//! The injected `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` are inputs to the
+//! runtime, not an authoritative credential: a stored
+//! `$DSH_HOME/.credentials.yaml` entry may take precedence over the launch
+//! environment in current upstream releases, and whether it outranks this
+//! injection is unverified (launch contract §4.1).
+//!
 //! The official runtime and its sources live at
 //! <https://github.com/deepseek-ai/deepseek-harness>.
 
