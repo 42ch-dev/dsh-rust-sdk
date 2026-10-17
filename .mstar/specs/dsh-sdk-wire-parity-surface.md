@@ -12,7 +12,7 @@ This spec is cross-iteration authority. It states the target surface, not a stop
 
 ## 1. Contract summary
 
-The SDK runtime speaks **newline-delimited JSON-RPC 2.0 over stdio** with exactly **three request methods** and **four server-to-client notifications** (`packages/sdk/protocol/src/types.ts:106-119`). The crate MUST mirror that set exactly: no additional method strings, no additional notification names, and no client-directed request handling exposed as public API.
+**Amended 2026-10-17 (re-verified at `dsh-v0.2.1-rc.1`).** The SDK runtime speaks **newline-delimited JSON-RPC 2.0 over stdio** with **seven request methods** — `initialize`, `session/prompt`, `session/resume`, `session/wait`, `session/working-directory/get`, `session/working-directory/set`, `shutdown` (`packages/sdk/protocol/src/types.ts:145-153`) — and **four server-to-client notifications** (`:137-142`). The frozen basis (`c389f96bf3`) declared exactly three request methods (`packages/sdk/protocol/src/types.ts:106-119`); the four additions are recorded in §2 and §8. The crate sends exactly **six** — `initialize`, `session/prompt`, `session/resume`, `session/working-directory/get`, `session/working-directory/set`, `shutdown`. Upstream's `session/wait` is deliberately not wrapped, matching both reference SDKs, whose public surfaces expose only resume plus working-directory get/set (§8; Task 1 report D.1–D.3). The crate MUST mirror that set exactly: no additional method strings, no additional notification names, and no client-directed request handling exposed as public API.
 
 The crate MUST keep unknown-tolerant parsing: an unrecognized content-block `type` (or a known tag with a malformed body) MUST fall through to `ContentBlock::Unknown(Value)` rather than fail the parse (`src/protocol.rs:63-73`; the reference clients are untyped here).
 
@@ -24,11 +24,14 @@ The crate MUST keep unknown-tolerant parsing: an unrecognized content-block `typ
 |---|---|---|---|
 | `initialize` | `{cwd, provider, model, reasoningEffort?, maxTokens?}` | `{serverInfo: {name, version}}` | `packages/sdk/protocol/src/types.ts:16-33,115`; dispatch `packages/sdk/server/src/server.ts:135,249` |
 | `session/prompt` | `{sessionId, contentBlocks}` | `{messageId}` | `packages/sdk/protocol/src/types.ts:36-59,116`; dispatch `packages/sdk/server/src/server.ts:176,250` |
+| `session/resume` | `{sessionId}` | `{}` — `Record<string, never>`; never parsed | at `dsh-v0.2.1-rc.1`: `packages/sdk/protocol/src/types.ts:62-65,148`; dispatch `packages/sdk/server/src/server.ts:222-231,349-355`; wrappers — Python `resume_session` (`python/sdk/src/deepseek_harness/api.py:124-131`, `client.py:191-196`), TS `resumeSession` (`packages/sdk/client/src/api.ts:113`, `client.ts:305`) |
+| `session/working-directory/get` | `{sessionId}` | `{cwd}` | at `dsh-v0.2.1-rc.1`: `packages/sdk/protocol/src/types.ts:74-77,150`; dispatch `packages/sdk/server/src/server.ts:270-273,361-367`; wrappers — Python `get_working_directory` (`python/sdk/src/deepseek_harness/api.py:148-151`, `client.py:199-205`), TS `getWorkingDirectory` (`packages/sdk/client/src/api.ts:185`, `client.ts:314`) |
+| `session/working-directory/set` | `{sessionId, path}` | `{cwd}` | at `dsh-v0.2.1-rc.1`: `packages/sdk/protocol/src/types.ts:80-83,151`; dispatch `packages/sdk/server/src/server.ts:280-283,362-371`; wrappers — Python `set_working_directory` (`python/sdk/src/deepseek_harness/api.py:153-156`, `client.py:208-214`), TS `setWorkingDirectory` (`packages/sdk/client/src/api.ts:195`, `client.ts:324`) |
 | `shutdown` | none (`params` omitted by both references) | `{}` | `packages/sdk/protocol/src/types.ts:118`; dispatch `packages/sdk/server/src/server.ts:206,252` |
 
 Normative rules:
 
-1. The crate MUST send only these three method strings. The method strings are wire constants, not an extension point.
+1. The crate MUST send only these six method strings (amended 2026-10-17 at `dsh-v0.2.1-rc.1`; the frozen rule bound three). Upstream's seventh method, `session/wait`, MUST NOT be sent by this crate — it is deliberately unwrapped, matching both reference SDKs (§8). The method strings are wire constants, not an extension point.
 2. `initialize` MUST be the first request on the transport, and `start()` MUST await its result before returning. `session/prompt` before a successful `initialize` is rejected by the runtime (`packages/sdk/server/src/server.ts:176-177` — `SDK server is not initialized`).
 3. `session/prompt.contentBlocks` MUST be sent verbatim as the user message (`packages/sdk/protocol/src/types.ts:39-41`); the runtime does not re-normalize non-image blocks (`packages/sdk/server/src/server.ts:39-41`).
 4. `shutdown` MUST be sent only by the close ladder. The runtime returns `{}` and the plugin then disposes the root and exits 0 (`packages/sdk/server/src/server.ts:206-237,252-253`).
@@ -54,6 +57,8 @@ Normative rules:
 2. `session.event.event` MUST stay an untyped `Value` in the crate: the event vocabulary is merge-extensible, and session format v2 changed it (§5.2). Parsing it into a closed Rust enum would break on the next upstream addition.
 3. `session.status` and `subagent.finished.status` / `stopReason` SHOULD stay strings rather than closed enums, matching both reference clients' unknown-value strategy. Their runtime vocabularies are documented here, not enforced at parse time.
 4. `subagent.started` MUST be treated as the only source of client-side parent→child edges; the tree filter is derived from it (§4.3).
+
+Re-verification record (2026-10-17): §3 was re-verified at `dsh-v0.2.1-rc.1` (Task 1 report W-3) — the four notifications, their payload shapes, and their emission sites hold with moved line numbers only (`packages/sdk/server/src/server.ts:103-147` at the tag). No §3 rule changed; nothing is restated here.
 
 ---
 
@@ -116,6 +121,8 @@ Because the crate keeps `session.event.event` untyped (§3.2), the run path is u
 #### 5.3.1 Supersession amendment (2026-09-24): `SESSION_FORMAT_VERSION` at `dsh-v0.1.7-rc.1`
 
 The frozen statement above records the frozen basis and is correct there: `SESSION_FORMAT_VERSION = 2` at `c389f96bf3` (`packages/core/session/src/types.ts:86`, re-observed 2026-09-24). The fact is superseded within the studied range `dsh-v0.1.5-rc.2 → dsh-v0.1.7-rc.1`: the constant is **3** at `dsh-v0.1.5-rc.2` (`types.ts:88` at that tag) and **4** at `dsh-v0.1.7-rc.1` (`types.ts:89` at the baseline tag) — a one-way upgrade: the version is "a single monotonic integer", historical generations are translated forward on read, and there is no version negotiation (constant doc comment `packages/core/session/src/types.ts:68-89`; header translation `:93`; both at the baseline tag). No crate rule in §5.3 changes: `session.event.event` stays opaque (§3.2), so the advance to V4 alters no wire or parsing obligation and the run path is unaffected exactly as stated above; the MUST NOT rules (no `assistant/chunk` claim, no embedded-stream parsing) apply to every generation. Evidence: plan `11-dsh-0.1.7-rc1-realignment` Task 1 report (`.mstar/sdd/11-dsh-0.1.7-rc1-realignment/task-1-report.md`) plus pinned-ref re-observation of both anchors on 2026-09-24 (`git show <tag>:packages/core/session/src/types.ts` → `SESSION_FORMAT_VERSION` 3 at `dsh-v0.1.5-rc.2`, 4 at `dsh-v0.1.7-rc.1`); §5.1.1 records the matching "reserved for Session V4 persistence" note. (Amendment 2026-09-24, plan `11-dsh-0.1.7-rc1-realignment`, QC finding F-002.)
+
+Re-verification record (2026-10-17): §5 was re-verified at `dsh-v0.2.1-rc.1` (Task 1 report W-10–W-14, W-21–W-25). Every §5 rule holds with moved line numbers only (`SESSION_FORMAT_VERSION = 4` at `packages/core/session/src/types.ts:90`; `ContentBlockMap` keeps its seven §5.1.1 members at `packages/llm/llm/src/types.ts:137-144`). No §5 content is restated or changed.
 
 ---
 
@@ -198,6 +205,8 @@ Rules:
 
 Python's analogue is `on_notification: Callable[[Notification], None] | None` (`python/sdk/src/deepseek_harness/api.py:124-131,139-144`), delivered by draining a subscription while waiting (`python/sdk/src/deepseek_harness/client.py:268-315`). TypeScript's is `onNotification?: (notification) => void` (`packages/sdk/client/src/api.ts:150-156`), invoked inline in the collect path (`packages/sdk/client/src/api.ts:186-200`). The crate follows the **behaviour** both share (arrival-order observation of the tree) and the **shape** of neither verbatim, because Rust cannot take an optional owning closure without changing the receiver; the signature above is the architect's locked decision and is normative.
 
+Re-verification record (2026-10-17): §6 was re-verified at `dsh-v0.2.1-rc.1` (Task 1 report W-5–W-8, W-18–W-19). Every parity verdict and derivation rule holds with moved line numbers only (Python `final_response` / `finish_reason` now at `python/sdk/src/deepseek_harness/api.py:230,250`). No §6 content is restated or changed.
+
 ---
 
 ## 7. Documented divergences
@@ -245,6 +254,7 @@ These are **out of scope** and MUST NOT be documented as delivered:
 - A Rust `expandAssistantStream` equivalent for v2 embedded streams (§5.3).
 - TypeScript-parity helpers (the crate has no TS parity contract).
 - Protocol version negotiation (`serverInfo.version` is hard-coded `0.0.1`).
+- `session/wait` (recorded 2026-10-17 at `dsh-v0.2.1-rc.1`): upstream declares it (`packages/sdk/protocol/src/types.ts:68-71,149`; dispatch `packages/sdk/server/src/server.ts:240-257,356-360`), but **neither reference SDK's public surface wraps it** — Python and TypeScript each expose only resume plus working-directory get/set, with no wrapper anywhere in `python/sdk/src/deepseek_harness/**` or `packages/sdk/client/src/**` (Task 1 report D.1/D.2). Upstream's own `packages/subagent/subagent-dsh-sdk/src/run.ts:335` consumes the method internally through the raw `request()` escape hatch. Exposing it in this crate therefore takes a deliberate spec decision, never an accident.
 
 ---
 
@@ -252,10 +262,10 @@ These are **out of scope** and MUST NOT be documented as delivered:
 
 A change to this contract MUST be verifiable by:
 
-1. **Protocol unit tests** asserting: `reasoningEffort` is absent when `None` and present when `Some`; a blank value is dropped; a `{"type":"file",...}` block parses to the typed variant; an image block with `originalDimensions` round-trips parse → serialize; an unknown tag still reaches `Unknown`.
+1. **Protocol unit tests** asserting: `reasoningEffort` is absent when `None` and present when `Some`; a blank value is dropped; a `{"type":"file",...}` block parses to the typed variant; an image block with `originalDimensions` round-trips parse → serialize; an unknown tag still reaches `Unknown`; `SessionResumeParams` / `SessionWorkingDirectoryParams` serialize as `{"sessionId"}`, `SessionWorkingDirectorySetParams` as `{"sessionId","path"}`, and `SessionWorkingDirectoryResult` parses `{"cwd"}` (added 2026-10-17 with the §2 rows).
 2. **A callback test** driven by the fake runtime: the callback fires for every notification the client received, in arrival order, and the returned `RunResult` is byte-identical to the no-callback path.
 3. **A bounded-handshake test**: a fake runtime that accepts the frame and never replies makes `start()` fail within the configured bound instead of hanging.
-4. **A parity table check**: the crate's `Config` / `RunResult` field sets match §6.1 / §6.2, asserted by exhaustive destructuring so an added or removed field breaks the build.
+4. **A parity table check**: the crate's `Config` / `RunResult` field sets match §6.1 / §6.2, asserted by exhaustive destructuring so an added or removed field breaks the build. Extended 2026-10-17 to the new wrappers: the directive-scripted fake runtime asserts that `HarnessClient::{resume_session,get_working_directory,set_working_directory}` (and the `api.rs` wrappers over them) emit exactly the §2 method strings with the §2 params shapes.
 5. **A removal grep** for `session_root` across spec, READMEs, and changelog fragment (AC5).
 
 ---
@@ -293,4 +303,16 @@ Drift-amendment citations (upstream @ `dsh-v0.1.7-rc.1` = `46a7f68b0922371ce7144
 | `packages/sdk/client/tests/sdk-client.spec.ts` | 141 |
 | `packages/llm/llm-deepseek/tests/serialize.spec.ts` | 453 |
 
-Re-verification rule: if upstream advances past `c389f96bf3`, re-run the greps behind §2, §3, §5.1, §5.3, and §6.3 against the new ref before restating any line here. A moved line number is not a contract change; a changed rule is. §5.1 was re-verified 2026-09-24 at `dsh-v0.1.7-rc.1`; the §5.1 greps are green at that ref with these expected outputs: `ContentBlockMap` at `packages/llm/llm/src/types.ts:138-146` with the seven members of §5.1.1; no `tool-result` map member and no `ToolResultBlock` anywhere under `packages/llm`; tool results as message-level `role: 'tool'` at `packages/llm/llm/src/message.ts:287-305`; `ImageBlock.offloaded?: true` at `packages/llm/llm/src/types.ts:88`. §5.3's version fact was re-verified the same day at the same ref (supersession §5.3.1); its grep — `git show <ref>:packages/core/session/src/types.ts | grep -n "SESSION_FORMAT_VERSION"` — returns the expected superseded value: `SESSION_FORMAT_VERSION = 4` at `packages/core/session/src/types.ts:89` (2 at the frozen basis `c389f96bf3` `:86`; 3 at `dsh-v0.1.5-rc.2` `:88`). The remaining §2/§3/§6.3 inventory rows re-ran green at the same ref (moved line numbers only, no changed rules; the protocol package is byte-identical across `dsh-v0.1.5-rc.2` → `dsh-v0.1.7-rc.1`).
+Re-baseline citations (upstream @ `dsh-v0.2.1-rc.1` = `1600d8a1e140dcde43a1a0941940a0480712c011`, recorded 2026-10-17 — the §1/§2/§8/§9 amendments above; every other row stays at its recorded ref, kept as history):
+
+| Path | Lines used |
+|---|---|
+| `packages/sdk/protocol/src/types.ts` | 62-65, 68-71, 74-77, 80-83, 86-88, 137-142, 145-153 |
+| `packages/sdk/server/src/server.ts` | 103-147, 188, 222-231, 240-257, 270-273, 280-283, 349-371 |
+| `packages/sdk/client/src/api.ts` | 113, 185, 195 |
+| `packages/sdk/client/src/client.ts` | 305, 314, 324, 328 |
+| `packages/subagent/subagent-dsh-sdk/src/run.ts` | 335 |
+| `python/sdk/src/deepseek_harness/api.py` | 124-131, 148-151, 153-156 |
+| `python/sdk/src/deepseek_harness/client.py` | 191-196, 199-205, 208-214 |
+
+Re-verification rule: if upstream advances past `dsh-v0.2.1-rc.1`, re-run the greps behind §2, §3, §5.1, §5.3, and §6.3 against the new ref before restating any line here. A moved line number is not a contract change; a changed rule is. Re-baselined 2026-10-17 at `dsh-v0.2.1-rc.1` (`1600d8a1e1`): all 25 wire §10 rows re-ran green (Task 1 report §A — moved line numbers only, no changed rule). Expected outputs at this ref: the request map at `packages/sdk/protocol/src/types.ts:145-153` with seven members, the four additions at `:148-151` (grep: `git grep -n "session/resume\|session/wait\|session/working-directory" dsh-v0.2.1-rc.1 -- packages/sdk/protocol/src/types.ts`); `serverInfo` still `{ name: 'deepseek-harness-sdk-runtime', version: '0.0.1' }` at `packages/sdk/server/src/server.ts:188`; `ContentBlockMap` at `packages/llm/llm/src/types.ts:137-144` with the seven members of §5.1.1 and `ImageBlock.offloaded?: true` at `:88`; no `tool-result` map member and no `ToolResultBlock` anywhere under `packages/llm`; tool results as message-level `role: 'tool'` at `packages/llm/llm/src/message.ts:299-305`; `SESSION_FORMAT_VERSION = 4` at `packages/core/session/src/types.ts:90`. The 2026-09-24 `dsh-v0.1.7-rc.1` expectations above remain history; the frozen `c389f96bf3` table remains the frozen-basis record.

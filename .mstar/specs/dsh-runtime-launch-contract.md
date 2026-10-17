@@ -27,13 +27,15 @@ The crate MUST NOT bundle, download, ship, or vend a runtime. Runtime acquisitio
 
 | Fact | Upstream evidence |
 |---|---|
-| The launcher's own flags are `--profile <name>`, `--patch <path>` (repeatable), `--dump-config`, `--dump-default-config` | `apps/cli/src/args.ts:137-140` |
+| The launcher's own flags are six at `dsh-v0.2.1-rc.1` (amended 2026-10-17; the frozen basis recorded four at `apps/cli/src/args.ts:137-140`): `--profile <name>` (`:168`), `--from-default-profile <name>` (`:169`), `--patch <path>` (repeatable, `:170`), `--dump-config` (`:171`), `--dump-config-schema` (`:172`), `--dump-default-config` (`:173`) | `apps/cli/src/args.ts:168-173` at `dsh-v0.2.1-rc.1` |
 | `--profile` is **mandatory**; a bare `dsh` prints `error: --profile <name> is required` and does not boot | `apps/cli/src/args.ts:144-146` |
 | An empty profile name is rejected (`error: --profile needs a name`) | `apps/cli/src/args.ts:148-149` |
 | The profile names a directory under `$DSH_HOME/profiles` | `apps/cli/src/args.ts:137` |
 | `--patch` is an ordered overlay applied **after** the profile layer, in argv order | `apps/cli/src/args.ts:138,24-25`; collector `:58-61`; empty patch path rejected `:91` |
 | Arguments after the launcher's own flags belong to the booted app | `apps/cli/src/args.ts:129-136` |
 | Shipped profile names include `sdk` and `sdk-minimal` | `packages/boot/app-boot/src/profile.ts:110-133` |
+
+The six-flag enumeration is a text refresh, not a contract change (Task 1 report L-1b/D-2): §2.2's crate obligations are unchanged and stay normative — the crate emits only `--profile`/`--patch`, and every §2.2 obligation re-verified PASS at the tag.
 
 Both reference clients compose exactly this argv:
 
@@ -103,7 +105,9 @@ The crate MUST write exactly these keys into the runtime child environment:
 | `DEEPSEEK_BASE_URL` | when `Config::base_url` is set | the configured URL |
 | `DEEPSEEK_API_KEY` | when `Config::api_key` is set | the configured key |
 
-`DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` remain supported because the runtime still reads them; they are unchanged by this contract (`python/sdk/src/deepseek_harness/api.py:70-73` injects them from `base_url` / `api_key` the same way).
+`DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` remain supported because the runtime still reads them; Python injects them from `base_url` / `api_key` the same way (`python/sdk/src/deepseek_harness/api.py:71-74` at `dsh-v0.2.1-rc.1`).
+
+**Upstream credential precedence — report-derived, not verified (recorded 2026-10-17).** The upstream upgrade report for `dsh-v0.2.0-rc.2 → dsh-v0.2.1-alpha.5` records a precedence inversion in `packages/credentials/credentials-local/src/index.ts`: a stored `$DSH_HOME/.credentials.yaml` `refs` entry now outranks the launch environment, with the full order **stored `refs` > launch environment > `$cwd/.env` > `$DSH_HOME/.env`** (`tmp/0.2.0rc2-to-0.2.1alpha5/UPGRADE-ADAPTATION.md` §4 CHANGED, an upstream-tree recon note; the file's own header comment at the tag states the same order, `packages/credentials/credentials-local/src/index.ts:1-12`). No runtime behaviour was verified for this contract. The crate keeps writing exactly the four keys above; no crate obligation changes. It is unknown whether stored refs override an explicitly injected `DEEPSEEK_API_KEY` — not verified; the interaction is recorded here as an open question and a risk, never as an assertion of either outcome.
 
 Precedence on collision: the caller's `Config::env` wins over the crate-injected `DSH_HOME`, matching today's documented override rule and Python's `env.update(self.config.env)` ordering (`python/sdk/src/deepseek_harness/client.py:75-77`).
 
@@ -115,7 +119,7 @@ Evidence that no reader exists upstream at `c389f96bf3`:
 
 - The bundled default `cordis.yml` that consumed `DSH_CORDIS_CONFIG` was deleted (`python/sdk-runtime/README.md:15`; `be7b064504` deleted the file), and `DSH_CORDIS_CONFIG` survives at HEAD only inside Python's own removal assertions (`python/sdk/tests/test_client.py:876`).
 - Sessions now live under `$DSH_HOME/sessions` (`packages/bundle/base/cordis.patch.yml:110-113` — `root: !!js dshHomePath('sessions')`), not under `DSH_SESSION_ROOT`.
-- The workspace cwd reaches the runtime through `initialize.cwd` (`packages/sdk/protocol/src/types.ts:17-18`) and the profile's `{{cwd}}` persona (`packages/bundle/sdk-app/cordis.patch.yml:5`), not through `DSH_CWD`.
+- The workspace cwd reaches the runtime through `initialize.cwd` (`packages/sdk/protocol/src/types.ts:18` at `dsh-v0.2.1-rc.1`, consumed at `packages/sdk/server/src/server.ts:164,182-183`), not through `DSH_CWD`. Citation corrected 2026-10-17 (Task 1 report L-6b/D-3): the shipped `sdk-app` profile no longer declares a `{{cwd}}` persona — `packages/bundle/sdk-app/cordis.patch.yml:5-6` at the tag carries `{{model}}` only. The normative no-reader claim of this section is unaffected, and its grep re-ran green at the tag.
 - Python removed all three writes in `56e038b2e3`; `python/sdk/tests/test_client.py:116-118` pins their absence.
 
 Writing them is not merely useless — it is misleading: the old code made `Config::session_root` *appear* to control where sessions land while they in fact landed under `~/.dsh`.
@@ -251,4 +255,14 @@ A change to this contract MUST be verifiable by:
 
 Rust-side paths (`src/runtime.rs`, `src/api.rs`, `src/error.rs`, `Cargo.toml`, `assets/cordis.yml`) are cited at the v0.1 tree and are the *removal* targets, not the contract source.
 
-Re-verification rule: if upstream advances past `c389f96bf3`, re-run the greps in §2.1, §3.1, and §4.2 against the new ref before restating any line here. A moved line number is not a contract change; a changed rule is.
+Re-baseline citations (upstream @ `dsh-v0.2.1-rc.1` = `1600d8a1e140dcde43a1a0941940a0480712c011`, recorded 2026-10-17 — the §2.1/§4.1/§4.2 amendments above; the frozen table stays as history):
+
+| Path | Lines used |
+|---|---|
+| `apps/cli/src/args.ts` | 26-27, 113, 167-173, 177-179, 182 |
+| `packages/credentials/credentials-local/src/index.ts` | 1-12 (header comment; §4.1's precedence fact stays report-derived, not verified) |
+| `packages/bundle/sdk-app/cordis.patch.yml` | 5-6, 17-18 |
+| `packages/sdk/server/src/server.ts` | 164, 182-183 |
+| `python/sdk/src/deepseek_harness/api.py` | 71-74 |
+
+Re-verification rule: if upstream advances past `dsh-v0.2.1-rc.1`, re-run the greps in §2.1, §3.1, and §4.2 against the new ref before restating any line here. A moved line number is not a contract change; a changed rule is. Re-baselined 2026-10-17 at `dsh-v0.2.1-rc.1` (`1600d8a1e1`): every §10 inventory row re-ran at the tag (Task 1 report §B, rows L-1a…L-14 — 14 PASS / 2 FAIL; both FAILs are the stale citations corrected above by the §2.1 and §4.2 amendments, not changed crate obligations). Re-verified rows at the tag: `apps/cli/src/args.ts` (flags `:168-173`; `--profile` mandatory `:177-179`; empty name rejected `:182`; ordered repeatable `--patch` `:170,26-27`; empty patch path rejected `:113`; app-args tail `:167`); `apps/cli/package.json:2,14-16`; `packages/util/home-paths/src/index.ts` (`:12`, `:18` exact; default `:71`; `~` expansion `:87-89`; resolution body `:108-109`; documented precedence `:127-131`); `packages/boot/app-boot/src/profile.ts` (`sdk` `:190`; `sdk-minimal` `:192-193`; first-use self-init `:266`); `packages/bundle/base/cordis.patch.yml:141`; `packages/bundle/sdk-app/cordis.patch.yml:17-18`; `packages/bundle/sdk-minimal/cordis.patch.yml:11-12`; `packages/sdk/protocol/src/types.ts:16-33`; `packages/sdk/client/src/launch.ts` (`:143`, `:148` exact; `sdk` default `:132`; patch resolution `:136-140`); `packages/sdk/client/src/types.ts:24-80`; `python/sdk/src/deepseek_harness/api.py` (`:14-37`; `RunResult` `:41-45`; key injection `:71-74`); `python/sdk/src/deepseek_harness/client.py` (`:60` exact; `env.update` `:77-78`; home refusals `:497-504`; argv `:506-512`); `python/sdk/tests/test_client.py:30-32,210-212,983`; `python/sdk-runtime/README.md:41`; and the §4.2 no-reader grep (`DSH_CORDIS_CONFIG` / `DSH_SESSION_ROOT` / `DSH_CWD` — every hit inside Python's own removal assertions). No row stays un-rerun at the older ref: all rows re-ran; body sections not amended above keep their frozen `c389f96bf3` citations, whose rules re-verified with moved line numbers only.
