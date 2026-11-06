@@ -49,6 +49,10 @@ crate 处于预发布线时，裸的 `cargo add deepseek-harness-sdk` 可能不�
 [运行时获取](#运行时获取)）与模型凭据（环境变量 `DEEPSEEK_API_KEY`，或
 `Config::api_key` / `Config::base_url`）。
 
+自带运行时由操作者自行安装：npm 发布的 CLI 要求 **Node.js `>= 24.9.0`**
+（其自身声明，`apps/cli/package.json`），平台 wheel 则自带 Node。crate 本身
+不安装任何东西——低于该下界时由 CLI 报告它自己的引擎错误，而非 crate 错误。
+
 ## 快速开始
 
 ```rust
@@ -225,7 +229,11 @@ harness 主目录遵循**运行时自身的优先级**，从高到低：
 
 ### `Session::run` —— 一次活动区间
 
-`run` 实现 Python `Session.run` 算法：
+`run` 实现 Python `Session.run` 的步骤序列，但有一处刻意的路由分歧：crate
+发送 `session/prompt`，而两个参考 SDK 的公开 `run()` 现已改走
+`session/query`——因此输入开头的 `/` 是普通 prompt 文本，永远不会被当作
+`/plan`、`/review` 之类的原生命令执行，`session.query.completed` 也从不被
+消费（规格 §7.7）。
 
 1. **在写入 prompt 之前**订阅会话树，保证本轮的每条通知都不会漏掉。
 2. 发送 `session/prompt`（受 `Config::request_timeout` 约束）。
@@ -312,14 +320,15 @@ run-semantics 测试套件作为逐字透传锁定。
 ### `RunResult`
 
 `RunResult` 遵循 **Python** SDK 的字段集——恰好五个字段，**没有**
-`session_root`（上游已移除并断言其不存在）。TypeScript SDK 的 `RunResult`
-缺少 `finish_reason`；Rust 跟随 Python：
+`session_root`（上游已移除并断言其不存在）。TypeScript 的 `RunResult` 以
+camelCase 名称携带同样的字段，包括 `finishReason: string | null`；Rust 跟随
+Python 的 snake_case 五字段集合：
 
 | 字段 | Python | TypeScript | Rust（本 crate） |
 |---|---|---|---|
 | `session_id` / `sessionId` | yes | yes | `session_id: String` |
 | `final_response` / `finalResponse` | yes | yes | `final_response: String` |
-| `finish_reason` | yes | no | `finish_reason: Option<String>` |
+| `finish_reason` / `finishReason` | yes | yes | `finish_reason: Option<String>` |
 | `events` | yes（仅根会话） | yes | `events: Vec<serde_json::Value>` |
 | `notifications` | yes（根 + 子代，传输顺序） | yes | `notifications: Vec<Notification>` |
 | `session_root` | no（已移除） | no | **不存在** |
@@ -400,8 +409,10 @@ fork 不会新增树边。树通知经由一条容量上限为 4096、drop-oldes
 1. **`DSH_HOME` 回退** —— Python 抛 `ValueError` 时，crate 解析 `~/.dsh`
    （见 [`DSH_HOME` 解析](#dsh_home-解析)）。
 2. **无客户端定向请求 API** —— Python 暴露 `next_request` / `respond` /
-   `notify`；crate 一个都不暴露（运行时不会发出客户端定向请求；此类请求
-   一律自动应答 `-32601`）。非目标，不是缺口。
+   `notify`；crate 一个都不暴露，并把每个客户端定向请求一律自动应答
+   `-32601`。运行时只会向在 `initialize` 中选择加入的客户端发出此类请求
+   （`approvalRequests` / `capabilities.userQuestions`），而本 crate 从不
+   选择加入。非目标，不是缺口。
 3. **更严格的畸形通知策略** —— 载荷不符合形状检查的 `session.event` /
    `session.status` 会使本次 run 以 `Error::SdkProtocol` 失败。Python 会
    静默跳过畸形 event/status，只在最后一条 `turn/end` 畸形时 raise；

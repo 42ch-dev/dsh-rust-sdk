@@ -178,7 +178,7 @@ The crate MUST expose exactly these `Config` fields (Python-parity naming, `pyth
 
 Removed relative to v0.1: `session_root`, `cordis_config`, `launch_args_override`, `runtime_bin` (renamed). See §5.
 
-**Additive upstream options (recorded 2026-11-06 at `dsh-v0.2.2-rc.1`), not crate fields.** Python's config gained two optional fields — `on_user_question` (`python/sdk/src/deepseek_harness/api.py:40`) and `approval_requests` (`:41`) — and the TypeScript mirror gained `onUserQuestion?` plus `reasoningEffort?`/`maxTokens?`/`approvalRequests?` (`packages/sdk/client/src/types.ts:26,66,68,70`). They gate surfaces this crate deliberately does not wrap (`dsh-sdk-wire-parity-surface.md` §6.1/§8), so the field set above stays exact and no crate obligation changes.
+**Additive upstream options (recorded 2026-11-06 at `dsh-v0.2.2-rc.1`), not crate fields.** Python's config gained two optional fields — `on_user_question` (`python/sdk/src/deepseek_harness/api.py:40`) and `approval_requests` (`:41`) — and the TypeScript mirror gained `onUserQuestion?` plus `reasoningEffort?`/`maxTokens?`/`approvalRequests?` (`packages/sdk/client/src/types.ts:26,66,68,70`). `on_user_question`/`onUserQuestion` and `approval_requests`/`approvalRequests` gate surfaces this crate deliberately does not wrap (`dsh-sdk-wire-parity-surface.md` §6.1/§8); `reasoningEffort`/`maxTokens` are already supported through the crate's own `initialize` fields (§6.1 above). Either way the field set above stays exact and no crate obligation changes.
 
 ### 6.2 `RunResult` field set
 

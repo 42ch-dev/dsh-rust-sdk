@@ -53,6 +53,11 @@ Two prerequisites before the first run: a DSH runtime (see
 (`DEEPSEEK_API_KEY` in the environment, or `Config::api_key` /
 `Config::base_url`).
 
+A bring-your-own runtime is operator-installed: the npm-published CLI requires
+**Node.js `>= 24.9.0`** (its own declaration, `apps/cli/package.json`), while
+the platform wheel carries its own Node. The crate installs nothing — below
+the floor the CLI reports its own engine failure, not a crate error.
+
 ## Quickstart
 
 ```rust
@@ -249,7 +254,11 @@ the spawned child behind an async mutex, sessions interleave at the
 
 ### `Session::run` — one activity interval
 
-`run` implements the Python `Session.run` algorithm:
+`run` implements the Python `Session.run` step sequence, with one deliberate
+routing divergence: this crate posts `session/prompt`, while both reference
+SDKs' public `run()` now route through `session/query` — so a leading `/` in
+the input is ordinary prompt text, never a native command such as `/plan` or
+`/review`, and `session.query.completed` is never consumed (spec §7.7).
 
 1. **Subscribe to the session tree before** writing the prompt, so no
    notification for this turn can be missed.
@@ -354,14 +363,16 @@ object verbatim.
 ### `RunResult`
 
 `RunResult` follows the **Python** SDK field set — exactly five fields, no
-`session_root` (upstream removed it and asserts its absence). The TypeScript
-SDK's `RunResult` lacks `finish_reason`; Rust follows Python:
+`session_root` (upstream removed it and asserts its absence). TypeScript's
+`RunResult` carries the same fields under camelCase names, including
+`finishReason: string | null`; Rust follows Python's snake_case five-field
+set:
 
 | Field | Python | TypeScript | Rust (this crate) |
 |---|---|---|---|
 | `session_id` / `sessionId` | yes | yes | `session_id: String` |
 | `final_response` / `finalResponse` | yes | yes | `final_response: String` |
-| `finish_reason` | yes | no | `finish_reason: Option<String>` |
+| `finish_reason` / `finishReason` | yes | yes | `finish_reason: Option<String>` |
 | `events` | yes (root session only) | yes | `events: Vec<serde_json::Value>` |
 | `notifications` | yes (root + descendants, transport order) | yes | `notifications: Vec<Notification>` |
 | `session_root` | no (removed) | no | **does not exist** |
@@ -454,8 +465,10 @@ Each divergence below is deliberate and documented; a contributor must not
 1. **`DSH_HOME` fallback** — the crate resolves `~/.dsh` where Python raises
    `ValueError` ([`DSH_HOME` resolution](#dsh_home-resolution)).
 2. **No client-directed request API** — Python exposes `next_request` /
-   `respond` / `notify`; the crate exposes none (the runtime emits no
-   client-directed requests; they are auto-answered `-32601`). Non-goal, not
+   `respond` / `notify`; the crate exposes none and auto-answers every
+   client-directed request `-32601`. The runtime only emits such requests to
+   a client that opts in at `initialize` (`approvalRequests` /
+   `capabilities.userQuestions`), which this crate never does. Non-goal, not
    a gap.
 3. **Stricter malformed-notification policy** — a `session.event` /
    `session.status` whose payload fails its shape check fails the run with

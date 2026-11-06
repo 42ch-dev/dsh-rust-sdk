@@ -214,7 +214,12 @@ pub struct Session<'a> {
 impl Session<'_> {
     /// Run one user turn and wait for the agent to go idle.
     ///
-    /// Python `Session.run` verbatim:
+    /// Parity scope: the step sequence below follows the Python SDK's run
+    /// algorithm, but it is **not** verbatim parity. This crate posts
+    /// `session/prompt`, while both reference SDKs' public `run()` now route
+    /// through `session/query` (spec §7.7). A leading `/` in the input is
+    /// therefore ordinary prompt text, never a native command, and
+    /// `session.query.completed` is never consumed.
     ///
     /// 1. Subscribe to the session tree **before** writing the prompt, so no
     ///    notification for this turn can be missed.
