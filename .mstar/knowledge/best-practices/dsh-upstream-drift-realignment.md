@@ -1,6 +1,7 @@
 ---
 module: deepseek-harness-sdk
 date: 2026-09-08
+last_updated: 2026-11-06
 problem_type: best_practice
 category: best-practices
 severity: high
@@ -52,6 +53,10 @@ This document captures the reusable discipline only; the specs own the facts.
 
 9. **Upstream drift is not only removal.** Re-alignment work has two shapes: a contract upstream replaced (the v0.1 launch break), where the crate must follow; and capability upstream added, where the crate must decide what to expose. The first is a migration, the second is a parity decision — and the second needs the reference-client comparison in guidance 7 before any surface is committed to.
 
+10. **An additive wire map does not mean unchanged reference behavior.** A release can keep every existing method and parameter, add one new method, and still change what a reference SDK's public entry point does: `Session.run()` moving from `session/prompt` to a newly added `session/query` that also interprets a leading `/` as a native command. Compatibility review therefore has two separate questions — does the crate's sent surface still exist unchanged (wire), and does the crate's documented behavior still match the reference clients (parity). A crate that deliberately keeps the old method is wire-compatible and needs no code change, but the divergence belongs in the spec (§7 divergence plus §8 non-goal) and in its consumer docs; otherwise the pin can move while the documentation silently claims the old parity.
+
+11. **A pinned handshake guard should reject a PATH-shadowed binary, and say so honestly.** `command -v dsh` can resolve a preinstalled runtime from an earlier plan run, so an exact-pin CI job also asserts the resolved path lives under the npm global bin directory that the install step writes. Deriving that directory (`npm prefix -g`) avoids a second copy of the version literal and avoids depending on `dsh --version` output format. That assertion proves **location**, not identity: another binary in the same directory would still satisfy it. The pinned-version guarantee comes from the exact-pin install step running on a clean runner; when stronger proof is needed, verify the installed package version explicitly (for example from the package manager's own listing) rather than inferring it from the path.
+
 ## Why This Matters
 
 The v0.1 break was silent: the crate compiled, unit tests passed, and only a real runtime failed to boot, because the launch contract had drifted and nothing verified it. Wrapper-derived facts can be wrapper choices, so the runtime source is the only authority. A keyless, pinned handshake in CI turns the next upstream drift into a loud failure at merge time instead of a customer-reported boot failure, and the frozen specs give any re-alignment plan a fixed target.
@@ -60,6 +65,7 @@ The v0.1 break was silent: the crate compiled, unit tests passed, and only a rea
 
 - Verifying or extending any contract this crate holds with the deepseek-harness runtime, wire or launch.
 - Upstream advances past the pinned ref: re-run the specs' re-verification greps before restating any contract line (launch spec §10, wire spec §10).
+- Answering "is this upstream release compatible?" — split the question into wire-surface stability and reference-behavior parity before reading the supplied upgrade report as the whole answer.
 - Removing or renaming an env knob, config field, or bundled asset: the removal must carry a named replacement and a deprecation note (AC5 pattern; launch spec §5).
 - Building the deferred `runtime-bin-delivery` (schemes B/C): the launch grammar locked in the spec is the model both schemes must compose, and `DSH_RUNTIME_BIN` must keep working (launch spec §8).
 - Adding a CI job that exercises a real runtime: pin an exact published version, cache npm, and fail loudly when the binary cannot be resolved.

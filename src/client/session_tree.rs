@@ -1,5 +1,12 @@
 //! The client-side session tree: the bounded `subagent.started` edge map and
 //! the tree-membership filter.
+//!
+//! `subagent.started` is the only source of parent→child edges, and the
+//! runtime emits it only for a session whose header `origin` is `subagent`
+//! with a known parent (`packages/sdk/server/src/server.ts:188-196` at
+//! `dsh-v0.2.2-rc.1`). An ordinary fork creates a child session but emits no
+//! edge, so this tree is exactly what the runtime reports, never an inferred
+//! fork lineage.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 

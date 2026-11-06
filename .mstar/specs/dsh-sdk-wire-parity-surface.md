@@ -14,6 +14,8 @@ This spec is cross-iteration authority. It states the target surface, not a stop
 
 **Amended 2026-10-17 (re-verified at `dsh-v0.2.1-rc.1`).** The SDK runtime speaks **newline-delimited JSON-RPC 2.0 over stdio** with **seven request methods** — `initialize`, `session/prompt`, `session/resume`, `session/wait`, `session/working-directory/get`, `session/working-directory/set`, `shutdown` (`packages/sdk/protocol/src/types.ts:145-153`) — and **four server-to-client notifications** (`:137-142`). The frozen basis (`c389f96bf3`) declared exactly three request methods (`packages/sdk/protocol/src/types.ts:106-119`); the four additions are recorded in §2 and §8. The crate sends exactly **six** — `initialize`, `session/prompt`, `session/resume`, `session/working-directory/get`, `session/working-directory/set`, `shutdown`. Upstream's `session/wait` is deliberately not wrapped, matching both reference SDKs, whose public surfaces expose only resume plus working-directory get/set (§8; Task 1 report D.1–D.3). The crate MUST mirror that set exactly: no additional method strings, no additional notification names, and no client-directed request handling exposed as public API.
 
+**Amended 2026-11-06 (re-verified at `dsh-v0.2.2-rc.1` = `66491b05e3f05ad35bcdd4f6cd7ed26041d9e3db`).** Upstream now declares **eight** request methods — the seven named above plus `session/query` (`packages/sdk/protocol/src/types.ts:210-219`; `session/query` at `:213`) — and **six** server-to-client notifications (`:193-207`). The crate still sends exactly the same **six** method strings and still models exactly four notification names: the additions are recorded in §2, §3 and §8, and none of them changes a crate obligation. `session/query` is declared upstream and is deliberately **not** sent by this crate (§7.7, §8).
+
 The crate MUST keep unknown-tolerant parsing: an unrecognized content-block `type` (or a known tag with a malformed body) MUST fall through to `ContentBlock::Unknown(Value)` rather than fail the parse (`src/protocol.rs:63-73`; the reference clients are untyped here).
 
 ---
@@ -22,21 +24,23 @@ The crate MUST keep unknown-tolerant parsing: an unrecognized content-block `typ
 
 | Method | Params | Result | Upstream evidence |
 |---|---|---|---|
-| `initialize` | `{cwd, provider, model, reasoningEffort?, maxTokens?}` | `{serverInfo: {name, version}}` | `packages/sdk/protocol/src/types.ts:16-33,115`; dispatch `packages/sdk/server/src/server.ts:135,249` |
-| `session/prompt` | `{sessionId, contentBlocks}` | `{messageId}` | `packages/sdk/protocol/src/types.ts:36-59,116`; dispatch `packages/sdk/server/src/server.ts:176,250` |
-| `session/resume` | `{sessionId}` | `{}` — `Record<string, never>`; never parsed | at `dsh-v0.2.1-rc.1`: `packages/sdk/protocol/src/types.ts:62-65,148`; dispatch `packages/sdk/server/src/server.ts:222-231,349-355`; wrappers — Python `resume_session` (`python/sdk/src/deepseek_harness/api.py:124-131`, `client.py:191-196`), TS `resumeSession` (`packages/sdk/client/src/api.ts:113`, `client.ts:305`) |
-| `session/working-directory/get` | `{sessionId}` | `{cwd}` | at `dsh-v0.2.1-rc.1`: `packages/sdk/protocol/src/types.ts:74-77,150`; dispatch `packages/sdk/server/src/server.ts:270-273,361-367`; wrappers — Python `get_working_directory` (`python/sdk/src/deepseek_harness/api.py:148-151`, `client.py:199-205`), TS `getWorkingDirectory` (`packages/sdk/client/src/api.ts:185`, `client.ts:314`) |
-| `session/working-directory/set` | `{sessionId, path}` | `{cwd}` | at `dsh-v0.2.1-rc.1`: `packages/sdk/protocol/src/types.ts:80-83,151`; dispatch `packages/sdk/server/src/server.ts:280-283,362-371`; wrappers — Python `set_working_directory` (`python/sdk/src/deepseek_harness/api.py:153-156`, `client.py:208-214`), TS `setWorkingDirectory` (`packages/sdk/client/src/api.ts:195`, `client.ts:324`) |
-| `shutdown` | none (`params` omitted by both references) | `{}` | `packages/sdk/protocol/src/types.ts:118`; dispatch `packages/sdk/server/src/server.ts:206,252` |
+| `initialize` | `{cwd, provider, model, approvalRequests?, reasoningEffort?, maxTokens?, capabilities?}` — only `cwd`, `provider`, `model` are required | `{serverInfo: {name, version}}` | at `dsh-v0.2.2-rc.1`: `packages/sdk/protocol/src/types.ts:18-33,211`; dispatch/handler `packages/sdk/server/src/server.ts:223-263,500-501` |
+| `session/prompt` | `{sessionId, contentBlocks}` | `{messageId}` | at `dsh-v0.2.2-rc.1`: `packages/sdk/protocol/src/types.ts:71-96,212`; dispatch/handler `packages/sdk/server/src/server.ts:270-289,502-503` |
+| `session/query` | `{sessionId, contentBlocks}` — the first text block may select a native `/` command | `{kind: "prompt", messageId}` or `{kind: "command", execution}` | **Declared upstream, NOT sent by this crate.** at `dsh-v0.2.2-rc.1`: `packages/sdk/protocol/src/types.ts:99-113,213`; dispatch/handler `packages/sdk/server/src/server.ts:297-340,504-512`; divergences §7.7, non-goal §8 |
+| `session/resume` | `{sessionId}` | `{}` — `Record<string, never>`; never parsed | at `dsh-v0.2.2-rc.1`: `packages/sdk/protocol/src/types.ts:119-122,214`; dispatch `packages/sdk/server/src/server.ts:513-519`; wrappers — Python `resume_session` (`python/sdk/src/deepseek_harness/api.py:179-186`, `client.py:220-226`), TS `resumeSession` (`packages/sdk/client/src/api.ts:115`, `client.ts:368-370`) |
+| `session/working-directory/get` | `{sessionId}` | `{cwd}` | at `dsh-v0.2.2-rc.1`: `packages/sdk/protocol/src/types.ts:131-134,216`; dispatch `packages/sdk/server/src/server.ts:525-532`; wrappers — Python `get_working_directory` (`python/sdk/src/deepseek_harness/api.py:204-207`, `client.py:243-250`), TS `getWorkingDirectory` (`packages/sdk/client/src/api.ts:236`, `client.ts:377-379`) |
+| `session/working-directory/set` | `{sessionId, path}` | `{cwd}` | at `dsh-v0.2.2-rc.1`: `packages/sdk/protocol/src/types.ts:137-146,217`; dispatch `packages/sdk/server/src/server.ts:525-534`; wrappers — Python `set_working_directory` (`python/sdk/src/deepseek_harness/api.py:209-212`, `client.py:252-259`), TS `setWorkingDirectory` (`packages/sdk/client/src/api.ts:246`, `client.ts:387-389`) |
+| `shutdown` | none (`params` omitted by both references) | `{}` | at `dsh-v0.2.2-rc.1`: `packages/sdk/protocol/src/types.ts:218`; dispatch/handler `packages/sdk/server/src/server.ts:446-449,536-537` |
 
 Normative rules:
 
-1. The crate MUST send only these six method strings (amended 2026-10-17 at `dsh-v0.2.1-rc.1`; the frozen rule bound three). Upstream's seventh method, `session/wait`, MUST NOT be sent by this crate — it is deliberately unwrapped, matching both reference SDKs (§8). The method strings are wire constants, not an extension point.
-2. `initialize` MUST be the first request on the transport, and `start()` MUST await its result before returning. `session/prompt` before a successful `initialize` is rejected by the runtime (`packages/sdk/server/src/server.ts:176-177` — `SDK server is not initialized`).
-3. `session/prompt.contentBlocks` MUST be sent verbatim as the user message (`packages/sdk/protocol/src/types.ts:39-41`); the runtime does not re-normalize non-image blocks (`packages/sdk/server/src/server.ts:39-41`).
-4. `shutdown` MUST be sent only by the close ladder. The runtime returns `{}` and the plugin then disposes the root and exits 0 (`packages/sdk/server/src/server.ts:206-237,252-253`).
+1. The crate MUST send only these six method strings (amended 2026-10-17 at `dsh-v0.2.1-rc.1`; the frozen rule bound three). Upstream's `session/wait` MUST NOT be sent by this crate — it is deliberately unwrapped, matching both reference SDKs (§8). Amended 2026-11-06 at `dsh-v0.2.2-rc.1`: upstream now declares eight methods, the addition being `session/query`; it MUST NOT be sent by this crate either (§7.7, §8), so the sent set stays exactly these six. The method strings are wire constants, not an extension point.
+2. `initialize` MUST be the first request on the transport, and `start()` MUST await its result before returning. `session/prompt` before a successful `initialize` is rejected by the runtime (`packages/sdk/server/src/server.ts:271` — `SDK server is not initialized`).
+3. `session/prompt.contentBlocks` MUST be sent verbatim as the user message (`packages/sdk/protocol/src/types.ts:74-75`); the runtime does not re-normalize non-image blocks (`packages/sdk/server/src/server.ts:59-73`).
+4. `shutdown` MUST be sent only by the close ladder. The runtime disposes server-owned agents and subscriptions to quiescence and returns `{}` (`packages/sdk/server/src/server.ts:440-449`); the plugin then exits 0.
 5. Outgoing request ids SHOULD stay string UUIDs; incoming ids MUST accept both string and number, matching the reference transports.
-6. `serverInfo.name` MUST equal `deepseek-harness-sdk-runtime` exactly; `serverInfo.version` is hard-coded `0.0.1` with **no version negotiation** (`packages/sdk/server/src/server.ts:168`). Strict name equality is a deliberate, documented divergence (§7.4).
+6. `serverInfo.name` MUST equal `deepseek-harness-sdk-runtime` exactly; `serverInfo.version` is hard-coded `0.0.1` with **no version negotiation** (`packages/sdk/server/src/server.ts:262`). Strict name equality is a deliberate, documented divergence (§7.4).
+7. **Documented runtime behavior — resumed-session model route (recorded 2026-11-06 at `dsh-v0.2.2-rc.1`), not a crate obligation.** `session/resume` applies the initialized route to the restored session: the initialized `provider`/`model` replaces the restored session's stored model selection, and a stored `reasoningEffort` survives only when the previous provider and model both equal the initialized ones (`packages/sdk/server/src/server.ts:574-590`; replacement comment `:577`, effort fallback `:581-585`). The crate sends no model fields on resume, so nothing in its request changes; a consumer MUST NOT assume the stored route is kept.
 
 ---
 
@@ -44,21 +48,27 @@ Normative rules:
 
 | Notification | Payload | Emission site |
 |---|---|---|
-| `session.event` | `{sessionId, event}` — the full session-log event envelope | `packages/sdk/server/src/server.ts:95-98` |
-| `session.status` | `{sessionId, status: "idle" \| "running"}` | `packages/sdk/server/src/server.ts:99-101` |
-| `subagent.started` | `{parentSessionId, childSessionId}` | `packages/sdk/server/src/server.ts:102-110` |
-| `subagent.finished` | `{provider, agentId, parentSessionId, childSessionId, status: "ok" \| "error", stopReason, lastAssistantMessage?}` | `packages/sdk/server/src/server.ts:111-127` |
+| `session.event` | `{sessionId, event}` — the full session-log event envelope | `packages/sdk/server/src/server.ts:171-179` |
+| `session.status` | `{sessionId, status: "idle" \| "running"}` | `packages/sdk/server/src/server.ts:185-187` |
+| `subagent.started` | `{parentSessionId, childSessionId}` — emitted only when `session.header.origin === 'subagent'` and a parent exists | `packages/sdk/server/src/server.ts:188-196` |
+| `subagent.finished` | `{provider, agentId, parentSessionId, childSessionId, status: "ok" \| "error", stopReason, lastAssistantMessage?}` | `packages/sdk/server/src/server.ts:197-215` |
+| `user-question.cancelled` | `{requestId, sessionId}` — added upstream 2026-11-06; **not modelled by this crate** | `packages/sdk/server/src/user-questions.ts:41` |
+| `session.query.completed` | `{sessionId, commandId, finalResponse, finishReason}` — added upstream 2026-11-06; **not consumed by this crate** (§7.7) | `packages/sdk/server/src/query-activity.ts:154` |
 
-Type evidence: `packages/sdk/protocol/src/types.ts:64-104,106-112`; `session.status` vocabulary `packages/core/agent/src/runtime-types.ts:103-110`; `SubagentStopReason` five reasons `packages/subagent/subagent/src/types.ts:252-263`; `subagent.finished.status` is a deployment mapping, so `max-tokens` can map to `ok` (`packages/sdk/server/src/server.ts:65-68`).
+The first four rows are the crate's whole model. The last two are upstream declarations recorded so the "must not invent others" rule reads as intentional; both reach the crate only as unknown notification methods on the opaque subscription path.
+
+Type evidence at `dsh-v0.2.2-rc.1`: `packages/sdk/protocol/src/types.ts:148-191` (the four payload interfaces), `:193-207` (the notification map, six members), `:52-57` (`SdkUserQuestionCancelled`); `session.status` vocabulary `packages/core/agent/src/runtime-types.ts:129-136`; `SubagentStopReason` five reasons `packages/subagent/subagent/src/types.ts:233-244`; `subagent.finished.status` is a deployment mapping (`packages/sdk/server/src/server.ts:86,208`), so `max-tokens` can map to `ok`.
 
 Normative rules:
 
-1. The crate MUST model exactly these four names and MUST NOT invent others.
+1. The crate MUST model exactly its four names (`session.event`, `session.status`, `subagent.started`, `subagent.finished`) and MUST NOT invent others. Amended 2026-11-06 at `dsh-v0.2.2-rc.1`: upstream declares **six** names, adding `user-question.cancelled` and `session.query.completed` (both recorded in the table above); the crate models neither, and both arrive only through its unknown-method path.
 2. `session.event.event` MUST stay an untyped `Value` in the crate: the event vocabulary is merge-extensible, and session format v2 changed it (§5.2). Parsing it into a closed Rust enum would break on the next upstream addition.
 3. `session.status` and `subagent.finished.status` / `stopReason` SHOULD stay strings rather than closed enums, matching both reference clients' unknown-value strategy. Their runtime vocabularies are documented here, not enforced at parse time.
-4. `subagent.started` MUST be treated as the only source of client-side parent→child edges; the tree filter is derived from it (§4.3).
+4. `subagent.started` MUST be treated as the only source of client-side parent→child edges; the tree filter is derived from it (§4.3). Amended 2026-11-06: the runtime emits it only for a session whose `session.header.origin === 'subagent'` with a known parent (`packages/sdk/server/src/server.ts:188-196` — the gate at `:190` precedes the notification at `:195`); an ordinary fork creates a child session but emits **no** edge, so the crate's tree is exactly what the runtime reports, never an inferred fork lineage.
 
 Re-verification record (2026-10-17): §3 was re-verified at `dsh-v0.2.1-rc.1` (Task 1 report W-3) — the four notifications, their payload shapes, and their emission sites hold with moved line numbers only (`packages/sdk/server/src/server.ts:103-147` at the tag). No §3 rule changed; nothing is restated here.
+
+Re-verification record (2026-11-06, `dsh-v0.2.2-rc.1`): §3 re-ran green with two additions and one narrowing — the four pre-existing payloads are unchanged (`packages/sdk/protocol/src/types.ts:148-191`), the map grew to six names (`:193-207`), and `subagent.started` is now gated on the session origin (`packages/sdk/server/src/server.ts:188-196`). The crate's model and rules are unchanged; §4.4's tree filter is unaffected because the runtime's edge set only became more specific.
 
 ---
 
@@ -144,7 +154,9 @@ Python `DeepSeekHarnessConfig` (`python/sdk/src/deepseek_harness/api.py:14-37`) 
 | `shutdown_timeout_seconds` | `timeouts` (close-ladder struct) | parity in behaviour; Rust splits the ladder into typed tiers |
 | `base_url`, `api_key` | same names | parity (injected as `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY`) |
 
-Crate-only fields MUST NOT exist beyond `timeouts` (the close-ladder struct, a local composition of Python's single `shutdown_timeout_seconds`). Python-only fields MUST NOT be dropped silently: `next_request` / `respond` / `notify` are a **Python-only** low-level surface and stay a non-goal (the runtime sends no client-directed requests — §7.2).
+Crate-only fields MUST NOT exist beyond `timeouts` (the close-ladder struct, a local composition of Python's single `shutdown_timeout_seconds`). Python-only fields MUST NOT be dropped silently: `next_request` / `respond` / `notify` are a **Python-only** low-level surface and stay a non-goal (the runtime sends client-directed requests only to a client that opts in at `initialize` — §7.2, §8 — and this crate never opts in, auto-answering them `-32601`).
+
+**Additive upstream options (recorded 2026-11-06 at `dsh-v0.2.2-rc.1`).** Python `DeepSeekHarnessConfig` gained `on_user_question: UserQuestionHandler | None = None` (`python/sdk/src/deepseek_harness/api.py:40`) and `approval_requests: bool = False` (`:41`); TypeScript's `HarnessClientOptions` mirror gained `onUserQuestion?` (`packages/sdk/client/src/types.ts:26`), and `DeepSeekHarnessOptions` gained `reasoningEffort?` / `maxTokens?` / `approvalRequests?` (`:66,68,70`). All are optional and additive, but they split two ways. `on_user_question` / `onUserQuestion` and `approval_requests` / `approvalRequests` gate the §8 opt-in surfaces this crate deliberately does not wrap. `reasoningEffort` and `maxTokens` are **already supported** through the crate's own `initialize` fields — `Config::reasoning_effort` (omit-when-unset, §6.3) and `Config::max_tokens` (the `max_tokens` parity row above). No crate obligation follows either way: the crate's `Config` field set stays exactly the list above, and the "no silent drop" rule still binds only the low-level Python-only methods.
 
 ### 6.2 `RunResult`
 
@@ -152,32 +164,38 @@ Crate-only fields MUST NOT exist beyond `timeouts` (the close-ladder struct, a l
 |---|---|---|---|
 | `session_id` | yes | yes | yes |
 | `final_response` | yes | yes | yes |
-| `finish_reason` | yes | **no** | yes — follows Python |
+| `finish_reason` | yes | yes (`finishReason: string \| null`, added 2026-11-06) | yes — follows Python |
 | `events` | yes | yes | yes |
 | `notifications` | yes | yes | yes |
 | `session_root` | **no** (removed) | no | **MUST NOT** exist |
 
-Evidence: `python/sdk/src/deepseek_harness/api.py:40-46`; `packages/sdk/client/src/types.ts:69-79`; upstream asserts the removal at `python/sdk/tests/test_client.py:880`.
+Evidence at `dsh-v0.2.2-rc.1`: `python/sdk/src/deepseek_harness/api.py:44-53`; `packages/sdk/client/src/types.ts:74-85`; upstream asserts the removal at `python/sdk/tests/test_client.py:968,990,994`.
 
 Derivation algorithms MUST match Python exactly except where §7 records a divergence:
 
-- `final_response` — reversed scan for the last root `assistant/message` whose `data` is an object and whose resolved `content` (`data.message.content` when `data.message` is an object, else `data.content`) is an array; a malformed last `assistant/message` (non-object `data` or non-array `content`) is skipped via `continue` and the scan falls back to the next earlier `assistant/message` (Python `continue` inside `reversed()`, `python/sdk/src/deepseek_harness/api.py:211-228`); a string `text` contributes its value while `null`, a missing `text`, or any other non-string `text` contributes `""` (Python coerces a *truthy* non-string `text` through `str()` instead — a recorded divergence, §7.6); `""` when no usable `assistant/message` exists.
-- `finish_reason` — last root `turn/end`'s `data.reason.kind` inside the activity interval; no `turn/end` → `None`; a malformed last `turn/end` → protocol error with the exact message `turn/end event requires a string data.reason.kind`; malformedness is checked only on the last one (reversed scan) (`python/sdk/src/deepseek_harness/api.py:231-248`).
-- The runtime's `turn/end` reason vocabulary is six kinds — `completed`, `aborted`, `blocked`, `error`, `max-tokens`, `interrupted` (`packages/core/session/src/types.ts:198-222`) — and MUST stay a string, not a closed enum.
+- `final_response` — reversed scan for the last root `assistant/message` whose `data` is an object and whose resolved `content` (`data.message.content` when `data.message` is an object, else `data.content`) is an array; a malformed last `assistant/message` (non-object `data` or non-array `content`) is skipped via `continue` and the scan falls back to the next earlier `assistant/message` (Python `continue` inside `reversed()`, `python/sdk/src/deepseek_harness/api.py:298-315`); a string `text` contributes its value while `null`, a missing `text`, or any other non-string `text` contributes `""` (Python coerces a *truthy* non-string `text` through `str()` instead — a recorded divergence, §7.6); `""` when no usable `assistant/message` exists.
+- `finish_reason` — last root `turn/end`'s `data.reason.kind` inside the activity interval; no `turn/end` → `None`; a malformed last `turn/end` → protocol error with the exact message `turn/end event requires a string data.reason.kind`; malformedness is checked only on the last one (reversed scan) (`python/sdk/src/deepseek_harness/api.py:318-334`).
+- The runtime's `turn/end` reason vocabulary is **seven** kinds — `completed`, `aborted`, `blocked`, `error`, `max-tokens`, `interrupted`, `forked` (`packages/core/session/src/types.ts:206-235`, `forked` at `:234`; corrected 2026-11-06, F-1 below) — and MUST stay a string, not a closed enum.
+
+**Fact corrections (recorded 2026-11-06 at `dsh-v0.2.2-rc.1`).** Three statements in this section were written from a smaller upstream surface. All three are corrections of documented facts, not of crate rules:
+
+- **F-1 — the `turn/end` vocabulary is seven kinds, not six.** `forked` (`packages/core/session/src/types.ts:234`) already existed at the `dsh-v0.2.1-rc.1` baseline (`types.ts:229` at that tag; introduced by `8696ec6cef`, 2026-09-17), so the 2026-10-17 re-verification missed it rather than upstream adding it in `dsh-v0.2.2-rc.1`. The crate's rule is exactly why the extra kind is harmless: `finish_reason` returns the raw string and never enumerates kinds.
+- **F-2 — Python's `Session.run()` now routes through `session/query`.** `Session.run` calls the private `HarnessClient._query` (`python/sdk/src/deepseek_harness/api.py:237`), which posts `session/query` (`python/sdk/src/deepseek_harness/client.py:228-241`); `session_prompt` survives only as the low-level client method (`client.py:201-218`). `RunResult` itself is unchanged (five fields, `api.py:44-53`). This crate keeps `session/prompt` — a recorded divergence, §7.7.
+- **F-3 — TypeScript's `RunResult` now carries `finishReason`.** `finishReason: string | null` (`packages/sdk/client/src/types.ts:74-85`, field at `:80`), with `finalResponse` documented as "final assistant text (empty when absent), native state-only result text, or a failure diagnostic" (`:77-78`). The crate keeps the five Python fields and still derives `finish_reason` itself because Python remains the alignment baseline (§6.2's crate column).
 
 ### 6.3 `reasoningEffort` — omit-when-unset (normative)
 
 1. `Config::reasoning_effort: Option<String>`; `InitializeParams.reasoning_effort: Option<String>` serialized as the wire key `reasoningEffort`.
 2. When unset (`None`) the key MUST be **omitted** from `params` entirely. When set, it MUST be sent as a non-empty string.
-3. An empty or whitespace-only value MUST be treated as unset and dropped, never sent: the server rejects a non-string or empty `reasoningEffort` with `TypeError('initialize reasoningEffort must be a non-empty string')` (`packages/sdk/server/src/server.ts:136-138`). Python applies the same rule by only adding the key when the value is not `None` (`python/sdk/src/deepseek_harness/client.py:147-148`).
-4. A set value is validated and applied by the server (`packages/sdk/server/src/server.ts:147-161`) and forwarded to every SDK-created agent (`packages/sdk/server/src/server.ts:285`).
+3. An empty or whitespace-only value MUST be treated as unset and dropped, never sent: the server rejects a non-string or empty `reasoningEffort` with `TypeError('initialize reasoningEffort must be a non-empty string')` (`packages/sdk/server/src/server.ts:227-229` at `dsh-v0.2.2-rc.1`). Python applies the same rule by only adding the key when the value is not `None` (`python/sdk/src/deepseek_harness/client.py:174-175`).
+4. A set value is validated and applied by the server (`packages/sdk/server/src/server.ts:238-252`) and forwarded to every SDK-created agent (`packages/sdk/server/src/server.ts:568-573`).
 
 ### 6.4 `initialize` bound (normative)
 
-1. `Config::initialize_timeout` defaults to **30 s** (`python/sdk/src/deepseek_harness/api.py:33`).
+1. `Config::initialize_timeout` defaults to **30 s** (`python/sdk/src/deepseek_harness/api.py:35` at `dsh-v0.2.2-rc.1`).
 2. The bound MUST apply to the `initialize` handshake request only, not to the activity interval or to `session/prompt`.
 3. `None` MUST mean **unbounded** and MUST remain expressible, so a caller can opt out deliberately. It is an explicit opt-out, not a legacy default and not a compatibility shim.
-4. On expiry the crate MUST return its timeout error and MUST NOT leave the child running (`python/sdk/src/deepseek_harness/client.py:152-160` closes the client and appends the selected profile before raising).
+4. On expiry the crate MUST return its timeout error and MUST NOT leave the child running (`python/sdk/src/deepseek_harness/client.py:180-199` at `dsh-v0.2.2-rc.1` closes the client and appends the selected profile before raising).
 
 TypeScript's default is 10 000 ms (`packages/sdk/client/src/launch.ts:12,151`; `packages/sdk/client/src/types.ts:44`). The crate follows **Python's 30 s**, consistent with the alignment baseline.
 
@@ -207,6 +225,8 @@ Python's analogue is `on_notification: Callable[[Notification], None] | None` (`
 
 Re-verification record (2026-10-17): §6 was re-verified at `dsh-v0.2.1-rc.1` (Task 1 report W-5–W-8, W-18–W-19). Every parity verdict and derivation rule holds with moved line numbers only (Python `final_response` / `finish_reason` now at `python/sdk/src/deepseek_harness/api.py:230,250`). No §6 content is restated or changed.
 
+Re-verification record (2026-11-06, `dsh-v0.2.2-rc.1`): §6 re-ran with four changed facts and no changed rule — F-1 (seven `turn/end` kinds), F-2 (Python `run()` → `session/query`), F-3 (TypeScript `finishReason`), and F-4 (additive optional config fields, §6.1). The derivation algorithms are unchanged at `python/sdk/src/deepseek_harness/api.py:298-315` (`final_response`) and `:318-334` (`finish_reason`), and the baseline `RunResult` still holds five fields at `:44-53`; the crate's field set and verdicts above are unchanged.
+
 ---
 
 ## 7. Documented divergences
@@ -219,7 +239,7 @@ The crate resolves `~/.dsh` when no home is configured, where Python raises `Val
 
 ### 7.2 No client-directed request API
 
-Python exposes `next_request` / `respond` / `respond_error` / `notify` (`python/sdk/src/deepseek_harness/client.py:214-260`); TypeScript exposes none (`packages/sdk/client/src/client.ts:265-268`). The crate follows TypeScript: client-directed requests are auto-answered `-32601` and are not public API (`src/client/read_loop.rs:134-149`). The runtime emits no client-directed requests (`packages/sdk/server/src/server.ts:246-257`), so this costs nothing. Non-goal, not a gap.
+Python exposes `next_request` / `respond` / `respond_error` / `notify` (`python/sdk/src/deepseek_harness/client.py:214-260`); TypeScript exposes none (`packages/sdk/client/src/client.ts:265-268`). The crate follows TypeScript: client-directed requests are auto-answered `-32601` and are not public API (`src/client/read_loop.rs:134-149`). The runtime emits client-directed requests only to a client that opts in at `initialize` — `approval/request` needs `approvalRequests: true` and `user-question/ask` needs `capabilities.userQuestions: true` (`packages/sdk/server/src/server.ts:130-144,246-259`; §8). This crate sends neither opt-in and auto-answers `-32601`, so this costs nothing. Non-goal, not a gap.
 
 ### 7.3 Malformed-notification policy is stricter than both references
 
@@ -243,18 +263,27 @@ Python appends `str(block.get("text") or "")` (`python/sdk/src/deepseek_harness/
 
 Verdict: **keep the crate's rule**. Faithfully emulating `str()` for arbitrary JSON values would need a Python-`repr` formatter (bool → `True`, float `1.0` → `"1.0"`, dict → `{'a': 1}`, `inf`, …) to serve a path unreachable from a conformant runtime, which the crate's simplicity rules reject. The rustdoc on `RunResult::final_response` and `derive_final_response` states the real rule and points here; the `derive_final_response` unit table asserts both the shared-domain parity and these divergence rows.
 
+### 7.7 `Session::run` stays on `session/prompt`
+
+`Session::run` MUST keep posting `session/prompt` (§2), so a leading `/` in run input is ordinary **prompt text**, never a native command. Both reference SDKs' *public* `run()` now route through the new `session/query` instead — Python calls the private `HarnessClient._query` (`python/sdk/src/deepseek_harness/api.py:215-237`, `client.py:228-241`), TypeScript reaches it through the internal `queryInput` helper (`packages/sdk/client/src/api.ts:260-265`, `client.ts:590-598`). The crate performs no command routing and does not need to: `prompt()` enqueues verbatim and contains no `/` branch (`packages/sdk/server/src/server.ts:270-289`); the branch exists only in `query()` (`:297-340`, at `:301`).
+
+The crate also MUST NOT consume `session.query.completed` (§3): it is an unknown notification name to this crate, delivered through the opaque subscription path, and run completion is still the root session's idle (§4.3). Consequence a consumer must know: on this crate `/plan`, `/review`, and any other native command are sent to the model as prompt text rather than executed by the runtime. Recorded 2026-11-06 at `dsh-v0.2.2-rc.1` from T1 facts F-2 and W-9 (Task 1 report §5, §6); the alternative is a new feature, not a parity fix, and is deferred in §8.
+
 ---
 
 ## 8. Deferred and non-goal surface
 
 These are **out of scope** and MUST NOT be documented as delivered:
 
-- Inline encoded-image prompt blocks (`SdkEncodedImageBlock`, `packages/sdk/protocol/src/types.ts:43-53`): needs a prompt-side type distinct from `ContentBlock::Image`; own plan.
+- Inline encoded-image prompt blocks (`SdkEncodedImageBlock`, `packages/sdk/protocol/src/types.ts:78-90` at `dsh-v0.2.2-rc.1`): needs a prompt-side type distinct from `ContentBlock::Image`; own plan.
 - Python-only `next_request` / `respond` / `notify` (§7.2).
 - A Rust `expandAssistantStream` equivalent for v2 embedded streams (§5.3).
 - TypeScript-parity helpers (the crate has no TS parity contract).
 - Protocol version negotiation (`serverInfo.version` is hard-coded `0.0.1`).
-- `session/wait` (recorded 2026-10-17 at `dsh-v0.2.1-rc.1`): upstream declares it (`packages/sdk/protocol/src/types.ts:68-71,149`; dispatch `packages/sdk/server/src/server.ts:240-257,356-360`), but **neither reference SDK's public surface wraps it** — Python and TypeScript each expose only resume plus working-directory get/set, with no wrapper anywhere in `python/sdk/src/deepseek_harness/**` or `packages/sdk/client/src/**` (Task 1 report D.1/D.2). Upstream's own `packages/subagent/subagent-dsh-sdk/src/run.ts:335` consumes the method internally through the raw `request()` escape hatch. Exposing it in this crate therefore takes a deliberate spec decision, never an accident.
+- `session/wait` (recorded 2026-10-17 at `dsh-v0.2.1-rc.1`; re-anchored 2026-11-06 at `dsh-v0.2.2-rc.1`): upstream declares it (`packages/sdk/protocol/src/types.ts:125-128,215`; dispatch `packages/sdk/server/src/server.ts:520-524`), but **neither reference SDK's public surface wraps it** — Python and TypeScript each expose only resume plus working-directory get/set, with no wrapper anywhere in `python/sdk/src/deepseek_harness/**` or `packages/sdk/client/src/**` (Task 1 report D.1/D.2). Upstream's own `packages/subagent/subagent-dsh-sdk/src/run.ts:335` consumes the method internally through the raw `request()` escape hatch. Exposing it in this crate therefore takes a deliberate spec decision, never an accident.
+- `session/query` (recorded 2026-11-06 at `dsh-v0.2.2-rc.1`) — **decided non-goal, not a gap.** Upstream declares it (`packages/sdk/protocol/src/types.ts:99-113,213`; dispatch `packages/sdk/server/src/server.ts:504-512`), but no *public* reference surface exposes it: Python's only wrapper is the private `HarnessClient._query` (`python/sdk/src/deepseek_harness/client.py:228`), and TypeScript's `HarnessSession` offers only `getWorkingDirectory` / `setWorkingDirectory` / `run` (`packages/sdk/client/src/api.ts:236,246,260`), reaching `session/query` solely through the internal `queryInput` helper (`packages/sdk/client/src/client.ts:590-598`). No crate consumer has asked for slash-command routing, and `Session::run` deliberately keeps `session/prompt` (§7.7). Wrapping it would add a feature, not restore parity.
+- `approval/request` (recorded 2026-11-06 at `dsh-v0.2.2-rc.1`) — **decided non-goal, not a gap.** It is a server→client request the server only sends after the client opts in with `initialize.approvalRequests === true` (`packages/sdk/protocol/src/types.ts:239-242`, field `:22`; gate `packages/sdk/server/src/server.ts:130-144,258`). The crate never sends the field and auto-answers client-directed requests `-32601` (§7.2), so it cannot receive one; no public reference wrapper exists either.
+- `user-question/ask` (recorded 2026-11-06 at `dsh-v0.2.2-rc.1`) — **decided non-goal, not a gap.** Same opt-in shape: `initialize.capabilities.userQuestions === true` (`packages/sdk/protocol/src/types.ts:59-62`, field `:32`; gate `packages/sdk/server/src/server.ts:259`), with the paired cancellation notification at `packages/sdk/server/src/user-questions.ts:41`. No public reference wrapper, and no crate consumer for host-answered questions.
 
 ---
 
@@ -316,3 +345,24 @@ Re-baseline citations (upstream @ `dsh-v0.2.1-rc.1` = `1600d8a1e140dcde43a1a0941
 | `python/sdk/src/deepseek_harness/client.py` | 191-196, 199-205, 208-214 |
 
 Re-verification rule: if upstream advances past `dsh-v0.2.1-rc.1`, re-run the greps behind §2, §3, §5.1, §5.3, and §6.3 against the new ref before restating any line here. A moved line number is not a contract change; a changed rule is. Re-baselined 2026-10-17 at `dsh-v0.2.1-rc.1` (`1600d8a1e1`): all 25 wire §10 rows re-ran green (Task 1 report §A — moved line numbers only, no changed rule). Expected outputs at this ref: the request map at `packages/sdk/protocol/src/types.ts:145-153` with seven members, the four additions at `:148-151` (grep: `git grep -n "session/resume\|session/wait\|session/working-directory" dsh-v0.2.1-rc.1 -- packages/sdk/protocol/src/types.ts`); `serverInfo` still `{ name: 'deepseek-harness-sdk-runtime', version: '0.0.1' }` at `packages/sdk/server/src/server.ts:188`; `ContentBlockMap` at `packages/llm/llm/src/types.ts:137-144` with the seven members of §5.1.1 and `ImageBlock.offloaded?: true` at `:88`; no `tool-result` map member and no `ToolResultBlock` anywhere under `packages/llm`; tool results as message-level `role: 'tool'` at `packages/llm/llm/src/message.ts:299-305`; `SESSION_FORMAT_VERSION = 4` at `packages/core/session/src/types.ts:90`. The 2026-09-24 `dsh-v0.1.7-rc.1` expectations above remain history; the frozen `c389f96bf3` table remains the frozen-basis record.
+
+Re-baseline citations (upstream @ `dsh-v0.2.2-rc.1` = `66491b05e3f05ad35bcdd4f6cd7ed26041d9e3db`, 2026-11-04; recorded 2026-11-06 — the §1/§2/§3/§6/§7.7/§8 amendments above; every earlier table stays at its recorded ref, kept as history):
+
+| Path | Lines used |
+|---|---|
+| `packages/sdk/protocol/src/types.ts` | 18-33, 52-57, 59-62, 71-96, 78-90, 99-113, 119-122, 125-128, 131-146, 148-191, 193-207, 210-219, 239-242 |
+| `packages/sdk/server/src/server.ts` | 59-73, 86, 130-144, 171-179, 185-187, 188-196, 197-215, 223-263, 270-289, 297-340, 440-449, 500-541, 568-590 |
+| `packages/sdk/server/src/user-questions.ts` | 41 |
+| `packages/sdk/server/src/query-activity.ts` | 154 |
+| `packages/sdk/client/src/api.ts` | 115, 236, 246, 260-265 |
+| `packages/sdk/client/src/client.ts` | 368-370, 377-379, 387-389, 590-598 |
+| `packages/sdk/client/src/types.ts` | 24-55, 58-71, 74-85 |
+| `packages/core/session/src/types.ts` | 90, 206-235 |
+| `packages/core/agent/src/runtime-types.ts` | 129-136 |
+| `packages/subagent/subagent/src/types.ts` | 233-244 |
+| `packages/subagent/subagent-dsh-sdk/src/run.ts` | 335 |
+| `python/sdk/src/deepseek_harness/api.py` | 14-41, 44-53, 179-186, 204-207, 209-212, 215-237, 298-315, 318-334 |
+| `python/sdk/src/deepseek_harness/client.py` | 174-175, 180-199, 201-218, 220-226, 228-241, 243-250, 252-259 |
+| `python/sdk/tests/test_client.py` | 968, 990, 994 |
+
+Re-verification rule (re-anchored 2026-11-06): if upstream advances past `dsh-v0.2.2-rc.1`, re-run the greps behind §2, §3, §5.1, §5.3, §6.1–§6.4, §7.7, and §8 against the new ref before restating any line here. A moved line number is not a contract change; a changed rule is. Re-baselined 2026-11-06 at `dsh-v0.2.2-rc.1` (`66491b05e3`): **29 wire rows — 27 PASS / 2 FAIL (fact)** (Task 1 report §1; Task 1 review confirms the counts), the two changed facts being the `turn/end` vocabulary and Python's `run()` routing, both restated above as F-1/F-2; the parallel launch inventory is **22 rows — 20 PASS / 2 FAIL (moved)**. One drift correction is recorded with them: `forked` was already present at the `dsh-v0.2.1-rc.1` baseline, so the 2026-10-17 re-verification missed a pre-existing kind rather than this tag adding one (F-1). Expected outputs at this ref: the request map at `packages/sdk/protocol/src/types.ts:210-219` with eight members and `session/query` at `:213`; the notification map at `:193-207` with six names; `serverInfo` still `{ name: 'deepseek-harness-sdk-runtime', version: '0.0.1' }` at `packages/sdk/server/src/server.ts:262`; `SESSION_FORMAT_VERSION = 4` at `packages/core/session/src/types.ts:90`; `ContentBlockMap` at `packages/llm/llm/src/types.ts:144-152` with the seven §5.1.1 members.

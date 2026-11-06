@@ -17,6 +17,8 @@ The crate MUST therefore compose a **launch** (program + ordered argv + child en
 
 The crate MUST NOT bundle, download, ship, or vend a runtime. Runtime acquisition stays bring-your-own (§8).
 
+**Runtime install prerequisite (recorded 2026-11-06 at `dsh-v0.2.2-rc.1`).** The `dsh` CLI declares Node **`>=24.9.0`** (`apps/cli/package.json:178-179`; the root manifest states the same bound). Bring-your-own therefore means an operator-installed runtime on a Node release at or above that bound; the crate installs, downloads, and versions nothing itself, and a caller below the bound gets the CLI's own engine failure rather than a crate error.
+
 ---
 
 ## 2. Launch grammar
@@ -27,15 +29,15 @@ The crate MUST NOT bundle, download, ship, or vend a runtime. Runtime acquisitio
 
 | Fact | Upstream evidence |
 |---|---|
-| The launcher's own flags are six at `dsh-v0.2.1-rc.1` (amended 2026-10-17; the frozen basis recorded four at `apps/cli/src/args.ts:137-140`): `--profile <name>` (`:168`), `--from-default-profile <name>` (`:169`), `--patch <path>` (repeatable, `:170`), `--dump-config` (`:171`), `--dump-config-schema` (`:172`), `--dump-default-config` (`:173`) | `apps/cli/src/args.ts:168-173` at `dsh-v0.2.1-rc.1` |
-| `--profile` is **mandatory**; a bare `dsh` prints `error: --profile <name> is required` and does not boot | `apps/cli/src/args.ts:144-146` |
-| An empty profile name is rejected (`error: --profile needs a name`) | `apps/cli/src/args.ts:148-149` |
-| The profile names a directory under `$DSH_HOME/profiles` | `apps/cli/src/args.ts:137` |
-| `--patch` is an ordered overlay applied **after** the profile layer, in argv order | `apps/cli/src/args.ts:138,24-25`; collector `:58-61`; empty patch path rejected `:91` |
-| Arguments after the launcher's own flags belong to the booted app | `apps/cli/src/args.ts:129-136` |
-| Shipped profile names include `sdk` and `sdk-minimal` | `packages/boot/app-boot/src/profile.ts:110-133` |
+| The launcher's own flags are six at `dsh-v0.2.2-rc.1` (amended 2026-11-06; re-baselined 2026-10-17 from the frozen basis, which recorded four at `apps/cli/src/args.ts:137-140`): `--profile <name>` (`:168`), `--from-default-profile <name>` (`:169`), `--patch <path>` (repeatable, `:170`), `--dump-config` (`:171`), `--dump-config-schema` (`:172`), `--dump-default-config` (`:173`) | `apps/cli/src/args.ts:168-173` at `dsh-v0.2.2-rc.1` |
+| `--profile` is **mandatory**; a bare `dsh` prints `error: --profile <name> is required` and does not boot | `apps/cli/src/args.ts:177-179` |
+| An empty profile name is rejected (`error: --profile needs a name`) | `apps/cli/src/args.ts:182` |
+| The profile names a directory under `$DSH_HOME/profiles` | `apps/cli/src/args.ts:168` (help text) + `packages/boot/app-boot/src/profile.ts:39,390` |
+| `--patch` is an ordered overlay applied **after** the profile layer, in argv order | `apps/cli/src/args.ts:26,170`; collector `:76`; empty patch path rejected `:113` |
+| Arguments after the launcher's own flags belong to the booted app | `apps/cli/src/args.ts:167` |
+| Shipped profile names include `sdk` and `sdk-minimal` | `packages/util/official-bundles/src/bundles.ts:9-26` (`sdk` `:20-22`, `sdk-minimal` `:23-25`) at `dsh-v0.2.2-rc.1`; the frozen `packages/boot/app-boot/src/profile.ts:110-133` citation stays as the `c389f96bf3` record |
 
-The six-flag enumeration is a text refresh, not a contract change (Task 1 report L-1b/D-2): §2.2's crate obligations are unchanged and stay normative — the crate emits only `--profile`/`--patch`, and every §2.2 obligation re-verified PASS at the tag.
+The six-flag enumeration is a text refresh, not a contract change (Task 1 report L-1b/D-2): §2.2's crate obligations are unchanged and stay normative — the crate emits only `--profile`/`--patch`, and every §2.2 obligation re-verified PASS at the tag. Re-anchored 2026-11-06 at `dsh-v0.2.2-rc.1`: the flag set is unchanged; the shipped-profile registry moved out of `profile.ts` into `packages/util/official-bundles/src/bundles.ts:9-26` (Task 1 report L-7/F-5), and every other row's lines moved only.
 
 Both reference clients compose exactly this argv:
 
@@ -75,7 +77,7 @@ Evidence: `packages/util/home-paths/src/index.ts:87-91` (function body: `configu
 2. Blank or whitespace-only `DSH_HOME` MUST be treated as unset, exactly as upstream does (`packages/util/home-paths/src/index.ts:88-89`).
 3. The resolved home MUST be an absolute path with `~` expanded before it is written to the child environment.
 4. The resolved home MUST be **observable by the caller** through public API. The crate MUST NOT resolve a home silently and write into it without the caller being able to read the value it selected. (This is the AC4 observability requirement; the product rationale is that `~/.dsh` is a real user directory, not a sandbox.)
-5. The crate SHOULD create the resolved home directory when it does not exist, so a fresh home boots (`dsh` self-initializes `$DSH_HOME/profiles/<name>` on first use — `packages/boot/app-boot/src/profile.ts:100,109-133,187`).
+5. The crate SHOULD create the resolved home directory when it does not exist, so a fresh home boots (`dsh` self-initializes `$DSH_HOME/profiles/<name>` on first use — `packages/boot/app-boot/src/profile.ts:202` at `dsh-v0.2.2-rc.1`, with the template it writes coming from `packages/util/official-bundles/src/bundles.ts:9-26`; the frozen `profile.ts:100,109-133,187` citation stays as the `c389f96bf3` record).
 
 ### 3.3 Deliberate divergence from the Python SDK
 
@@ -119,7 +121,7 @@ Evidence that no reader exists upstream at `c389f96bf3`:
 
 - The bundled default `cordis.yml` that consumed `DSH_CORDIS_CONFIG` was deleted (`python/sdk-runtime/README.md:15`; `be7b064504` deleted the file), and `DSH_CORDIS_CONFIG` survives at HEAD only inside Python's own removal assertions (`python/sdk/tests/test_client.py:876`).
 - Sessions now live under `$DSH_HOME/sessions` (`packages/bundle/base/cordis.patch.yml:110-113` — `root: !!js dshHomePath('sessions')`), not under `DSH_SESSION_ROOT`.
-- The workspace cwd reaches the runtime through `initialize.cwd` (`packages/sdk/protocol/src/types.ts:18` at `dsh-v0.2.1-rc.1`, consumed at `packages/sdk/server/src/server.ts:164,182-183`), not through `DSH_CWD`. Citation corrected 2026-10-17 (Task 1 report L-6b/D-3): the shipped `sdk-app` profile no longer declares a `{{cwd}}` persona — `packages/bundle/sdk-app/cordis.patch.yml:5-6` at the tag carries `{{model}}` only. The normative no-reader claim of this section is unaffected, and its grep re-ran green at the tag.
+- The workspace cwd reaches the runtime through `initialize.cwd` (`packages/sdk/protocol/src/types.ts:18`, consumed at `packages/sdk/server/src/server.ts:235,253,590` at `dsh-v0.2.2-rc.1` — resolve, store, then record on each created session's `meta.cwd`), not through `DSH_CWD`. Citation corrected 2026-10-17 (Task 1 report L-6b/D-3) and re-anchored 2026-11-06 (Task 1 report L-16): the shipped `sdk-app` profile no longer declares a `{{cwd}}` persona — `packages/bundle/sdk-app/cordis.patch.yml:5-6` at the tag carries `{{model}}` only. The normative no-reader claim of this section is unaffected, and its grep re-ran green at the tag.
 - Python removed all three writes in `56e038b2e3`; `python/sdk/tests/test_client.py:116-118` pins their absence.
 
 Writing them is not merely useless — it is misleading: the old code made `Config::session_root` *appear* to control where sessions land while they in fact landed under `~/.dsh`.
@@ -176,19 +178,21 @@ The crate MUST expose exactly these `Config` fields (Python-parity naming, `pyth
 
 Removed relative to v0.1: `session_root`, `cordis_config`, `launch_args_override`, `runtime_bin` (renamed). See §5.
 
+**Additive upstream options (recorded 2026-11-06 at `dsh-v0.2.2-rc.1`), not crate fields.** Python's config gained two optional fields — `on_user_question` (`python/sdk/src/deepseek_harness/api.py:40`) and `approval_requests` (`:41`) — and the TypeScript mirror gained `onUserQuestion?` plus `reasoningEffort?`/`maxTokens?`/`approvalRequests?` (`packages/sdk/client/src/types.ts:26,66,68,70`). `on_user_question`/`onUserQuestion` and `approval_requests`/`approvalRequests` gate surfaces this crate deliberately does not wrap (`dsh-sdk-wire-parity-surface.md` §6.1/§8); `reasoningEffort`/`maxTokens` are already supported through the crate's own `initialize` fields (§6.1 above). Either way the field set above stays exact and no crate obligation changes.
+
 ### 6.2 `RunResult` field set
 
-`RunResult` MUST have exactly the five Python fields (`python/sdk/src/deepseek_harness/api.py:40-46`):
+`RunResult` MUST have exactly the five Python fields (`python/sdk/src/deepseek_harness/api.py:44-53` at `dsh-v0.2.2-rc.1`):
 
 | Field | Type | Meaning |
 |---|---|---|
 | `session_id` | `String` | the SDK session the turn ran on |
-| `final_response` | `String` | last root `assistant/message` text (Python algorithm, `python/sdk/src/deepseek_harness/api.py:211-228`) |
-| `finish_reason` | `Option<String>` | last root `turn/end` `data.reason.kind` (Python algorithm, `python/sdk/src/deepseek_harness/api.py:231-248`) |
+| `final_response` | `String` | last root `assistant/message` text (Python algorithm, `python/sdk/src/deepseek_harness/api.py:298-315`) |
+| `finish_reason` | `Option<String>` | last root `turn/end` `data.reason.kind` (Python algorithm, `python/sdk/src/deepseek_harness/api.py:318-334`) |
 | `events` | `Vec<Value>` | root-session `session.event` payloads, transport order |
 | `notifications` | `Vec<Notification>` | every tree notification, transport order |
 
-`session_root` MUST NOT be present. `finish_reason` MUST be present: Python has it and TypeScript does not (`packages/sdk/client/src/types.ts:69-79`), and the crate's alignment baseline is Python (root `AGENTS.md`-level direction; roadmap § Direction).
+`session_root` MUST NOT be present. `finish_reason` MUST be present, and the crate's alignment baseline is Python (root `AGENTS.md`-level direction; roadmap § Direction). **Amended 2026-11-06 (`dsh-v0.2.2-rc.1`):** TypeScript's `RunResult` now also carries `finishReason: string | null` (`packages/sdk/client/src/types.ts:74-85`, field `:80`), so `finish_reason` is no longer a crate-vs-TypeScript difference; the rule is unchanged and still follows Python (`dsh-sdk-wire-parity-surface.md` §6.2, F-3).
 
 ---
 
@@ -266,3 +270,26 @@ Re-baseline citations (upstream @ `dsh-v0.2.1-rc.1` = `1600d8a1e140dcde43a1a0941
 | `python/sdk/src/deepseek_harness/api.py` | 71-74 |
 
 Re-verification rule: if upstream advances past `dsh-v0.2.1-rc.1`, re-run the greps in §2.1, §3.1, and §4.2 against the new ref before restating any line here. A moved line number is not a contract change; a changed rule is. Re-baselined 2026-10-17 at `dsh-v0.2.1-rc.1` (`1600d8a1e1`): every §10 inventory row re-ran at the tag (Task 1 report §B, rows L-1a…L-14 — 14 PASS / 2 FAIL; both FAILs are the stale citations corrected above by the §2.1 and §4.2 amendments, not changed crate obligations). Re-verified rows at the tag: `apps/cli/src/args.ts` (flags `:168-173`; `--profile` mandatory `:177-179`; empty name rejected `:182`; ordered repeatable `--patch` `:170,26-27`; empty patch path rejected `:113`; app-args tail `:167`); `apps/cli/package.json:2,14-16`; `packages/util/home-paths/src/index.ts` (`:12`, `:18` exact; default `:71`; `~` expansion `:87-89`; resolution body `:108-109`; documented precedence `:127-131`); `packages/boot/app-boot/src/profile.ts` (`sdk` `:190`; `sdk-minimal` `:192-193`; first-use self-init `:266`); `packages/bundle/base/cordis.patch.yml:141`; `packages/bundle/sdk-app/cordis.patch.yml:17-18`; `packages/bundle/sdk-minimal/cordis.patch.yml:11-12`; `packages/sdk/protocol/src/types.ts:16-33`; `packages/sdk/client/src/launch.ts` (`:143`, `:148` exact; `sdk` default `:132`; patch resolution `:136-140`); `packages/sdk/client/src/types.ts:24-80`; `python/sdk/src/deepseek_harness/api.py` (`:14-37`; `RunResult` `:41-45`; key injection `:71-74`); `python/sdk/src/deepseek_harness/client.py` (`:60` exact; `env.update` `:77-78`; home refusals `:497-504`; argv `:506-512`); `python/sdk/tests/test_client.py:30-32,210-212,983`; `python/sdk-runtime/README.md:41`; and the §4.2 no-reader grep (`DSH_CORDIS_CONFIG` / `DSH_SESSION_ROOT` / `DSH_CWD` — every hit inside Python's own removal assertions). No row stays un-rerun at the older ref: all rows re-ran; body sections not amended above keep their frozen `c389f96bf3` citations, whose rules re-verified with moved line numbers only.
+
+Re-baseline citations (upstream @ `dsh-v0.2.2-rc.1` = `66491b05e3f05ad35bcdd4f6cd7ed26041d9e3db`, 2026-11-04; recorded 2026-11-06 — the §1/§2.1/§3.2.5/§4.2/§6.1/§6.2 amendments above; the frozen and `dsh-v0.2.1-rc.1` tables stay as history):
+
+| Path | Lines used |
+|---|---|
+| `apps/cli/src/args.ts` | 24-27, 76, 113, 155-167, 168-173, 177-179, 182 |
+| `apps/cli/package.json` | 2, 4, 14-16, 178-179 |
+| `packages/util/official-bundles/src/bundles.ts` | 9-26 |
+| `packages/boot/app-boot/src/profile.ts` | 39, 171, 202, 390 |
+| `packages/util/home-paths/src/index.ts` | 12, 18, 70-71, 87, 108-109, 127-136 |
+| `packages/credentials/credentials-local/src/index.ts` | 1-14 (header comment; §4.1's precedence fact stays report-derived, not verified) |
+| `packages/bundle/base/cordis.patch.yml` | 138-141, 497-505 |
+| `packages/bundle/sdk-app/cordis.patch.yml` | 5-6, 17-19 |
+| `packages/bundle/sdk-minimal/cordis.patch.yml` | 11-12 |
+| `packages/sdk/server/src/server.ts` | 235, 253, 590 |
+| `packages/sdk/protocol/src/types.ts` | 18-33 |
+| `packages/sdk/client/src/types.ts` | 24-55, 58-71, 74-85 |
+| `packages/sdk/client/src/launch.ts` | 132, 136-140, 143, 148 |
+| `python/sdk/src/deepseek_harness/api.py` | 14-41, 44-53, 125-127, 298-315, 318-334 |
+| `python/sdk/src/deepseek_harness/client.py` | 87, 180-199, 601-616 |
+| `python/sdk/tests/test_client.py` | 30-32, 211-213, 968, 990, 994 |
+
+Re-verification rule (re-anchored 2026-11-06): if upstream advances past `dsh-v0.2.2-rc.1`, re-run the greps in §2.1, §3.1, §4.1, §4.2, and §6 against the new ref before restating any line here. A moved line number is not a contract change; a changed rule is. Re-baselined 2026-11-06 at `dsh-v0.2.2-rc.1` (`66491b05e3`): **22 launch rows — 20 PASS / 2 FAIL (moved)** (Task 1 report §2), both failures being citation moves already corrected above — the shipped-profile registry (L-7/F-5) and the `initialize.cwd` consumption (L-16) — not changed crate obligations. Re-verified rows at the tag: `apps/cli/src/args.ts` (flags `:168-173`; `--profile` mandatory `:177-179`; empty name rejected `:182`; ordered repeatable `--patch` `:26,76,170`; empty patch path rejected `:113`; app-args tail `:167`); `apps/cli/package.json:2,4,14-16` with engines `>=24.9.0` at `:178-179`; `packages/util/official-bundles/src/bundles.ts:9-26`; `packages/boot/app-boot/src/profile.ts` (`PROFILES_DIR` `:39`, first-use self-init `:202`, `profilesDir` `:390`); `packages/util/home-paths/src/index.ts` (`:12` and `:18` exact; default `:70-71`; `~` expansion `:87`; resolution body `:108-109`; documented precedence `:127-136`); `packages/bundle/base/cordis.patch.yml` (`sessions` root `:138-141`; executor rows `:497-505`); `packages/bundle/sdk-app/cordis.patch.yml:5-6,17-19`; `packages/bundle/sdk-minimal/cordis.patch.yml:11-12`; `packages/sdk/server/src/server.ts:235,253,590`; `python/sdk/src/deepseek_harness/client.py:87,601-616`; `python/sdk/tests/test_client.py:30-32,211-213,968,990,994`; and the §4.2 no-reader grep (every hit inside Python's own removal assertions). Body sections not amended above keep their frozen `c389f96bf3` citations, whose rules re-verified with moved line numbers only.
