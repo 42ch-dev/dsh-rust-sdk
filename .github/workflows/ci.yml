@@ -105,13 +105,25 @@ jobs:
       - name: Resolve runtime binary
         # Fail loudly when the pinned runtime cannot be resolved: an empty
         # DSH_RUNTIME_BIN would make test tiers skip and the job would go
-        # green without ever running the handshake (qc3 F-001).
+        # green without ever running the handshake (qc3 F-001). The second
+        # guard proves the resolved dsh is the one this job's `npm install -g`
+        # just put in the npm global bin dir, not a preinstalled binary that
+        # happens to come first on PATH (qc3 F-04); it deliberately avoids
+        # parsing `dsh --version` output.
         run: |
+          NPM_GLOBAL_BIN="$(npm prefix -g)/bin"
           DSH_RUNTIME_BIN="$(command -v dsh)"
           if [ -z "$DSH_RUNTIME_BIN" ]; then
             echo "::error::dsh not found on PATH after npm install -g @deepseek-ai/dsh@0.2.2-rc.1"
             exit 1
           fi
+          case "$DSH_RUNTIME_BIN" in
+            "$NPM_GLOBAL_BIN"/*) ;;
+            *)
+              echo "::error::$DSH_RUNTIME_BIN is not the dsh npm install -g just provided; expected under $NPM_GLOBAL_BIN"
+              exit 1
+              ;;
+          esac
           echo "DSH_RUNTIME_BIN=$DSH_RUNTIME_BIN" >> "$GITHUB_ENV"
 
       - name: Setup Rust toolchain
