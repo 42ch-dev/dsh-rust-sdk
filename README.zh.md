@@ -53,6 +53,29 @@ crate 处于预发布线时，裸的 `cargo add deepseek-harness-sdk` 可能不�
 （其自身声明，`apps/cli/package.json`），平台 wheel 则自带 Node。crate 本身
 不安装任何东西——低于该下界时由 CLI 报告它自己的引擎错误，而非 crate 错误。
 
+### 已验证的运行时版本
+
+下表中的每个版本都经过两项检查：**无密钥握手**——crate 从该安装启动运行时，
+`DeepSeekHarness::start` 完成 `initialize`，`close` 回收子进程，不需要 API key，
+也不跑真实轮次；以及在对应发布 tag 上**阅读上游面向 SDK 的表面**。
+
+| 运行时（`@deepseek-ai/dsh`） | 状态 | 验证方式 |
+|---|---|---|
+| `0.2.2-rc.1` | 已验证 | CI 无密钥握手；在 `dsh-v0.2.2-rc.1` 重新核对线上协议与启动契约 |
+| `0.2.1-rc.5` | 已验证 | 无密钥握手；`dsh-v0.2.1-rc.5` 的 SDK 表面差异审计 |
+| `0.2.1-rc.4` | 已验证 | 无密钥握手；`dsh-v0.2.1-rc.4` 的 SDK 表面差异审计 |
+| `0.2.1-rc.3` | 已验证 | 无密钥握手；`dsh-v0.2.1-rc.3` 的 SDK 表面差异审计 |
+| `0.2.1-rc.2` | 已验证 | 无密钥握手；`dsh-v0.2.1-rc.2` 的 SDK 表面差异审计 |
+| `0.2.1-rc.1` | 已验证 | 无密钥握手；在 `dsh-v0.2.1-rc.1` 重新核对线上协议与启动契约 |
+
+crate 只发送六个方法——`initialize`、`session/prompt`、`session/resume`、
+`session/working-directory/get`、`session/working-directory/set` 与
+`shutdown`——并且对返回内容宽容解析：未知字段不会让响应解析失败。因此这些版本
+之间的上游增量变化预期可以原样透传。
+
+表中之外的版本**未经验证**。握手任务实际运行的版本由
+`.github/workflows/ci.yml` 中的固定值指明。
+
 ## 快速开始
 
 ```rust

@@ -58,6 +58,31 @@ A bring-your-own runtime is operator-installed: the npm-published CLI requires
 the platform wheel carries its own Node. The crate installs nothing — below
 the floor the CLI reports its own engine failure, not a crate error.
 
+### Verified runtime versions
+
+Each release below was checked two ways: a **keyless handshake** — the crate
+spawns the runtime from that install, `DeepSeekHarness::start` completes
+`initialize`, and `close` reaps the child, with no API key and no live turn —
+and a reading of the **upstream SDK-facing surface** at the release tag.
+
+| Runtime (`@deepseek-ai/dsh`) | Status | Verified by |
+|---|---|---|
+| `0.2.2-rc.1` | verified | CI keyless handshake; wire and launch contract re-verified at `dsh-v0.2.2-rc.1` |
+| `0.2.1-rc.5` | verified | keyless handshake; SDK-surface diff at `dsh-v0.2.1-rc.5` |
+| `0.2.1-rc.4` | verified | keyless handshake; SDK-surface diff at `dsh-v0.2.1-rc.4` |
+| `0.2.1-rc.3` | verified | keyless handshake; SDK-surface diff at `dsh-v0.2.1-rc.3` |
+| `0.2.1-rc.2` | verified | keyless handshake; SDK-surface diff at `dsh-v0.2.1-rc.2` |
+| `0.2.1-rc.1` | verified | keyless handshake; wire and launch contract re-verified at `dsh-v0.2.1-rc.1` |
+
+The crate sends only six methods — `initialize`, `session/prompt`,
+`session/resume`, `session/working-directory/get`,
+`session/working-directory/set`, and `shutdown` — and parses what comes back
+tolerantly, so an unknown field never fails a response: additive upstream
+changes between these releases are expected to pass through unchanged.
+
+Releases outside this table are **unverified**. The pin in
+`.github/workflows/ci.yml` names the version the handshake job exercises.
+
 ## Quickstart
 
 ```rust
