@@ -169,10 +169,16 @@ impl DeepSeekHarness {
     /// Python `DeepSeekHarness.resume_session` parity.
     ///
     /// Upstream `session/resume` (`packages/sdk/server/src/server.ts` at
-    /// `dsh-v0.2.1-rc.1`) keeps the stored session identity and directory,
+    /// `dsh-v0.2.2-rc.1`) keeps the stored session identity and directory,
     /// repairs an interrupted final turn without sending input, and never
     /// creates a replacement; a missing, unreadable, or already-open/opening
     /// session is a JSON-RPC error (surfaced as [`Error::JsonRpc`]).
+    ///
+    /// The initialized route then replaces the restored session's stored
+    /// model selection (`server.ts:574-590` at that tag): a stored reasoning
+    /// effort survives only when the previous provider and model both equal
+    /// the initialized ones, so a caller MUST NOT assume the stored route is
+    /// kept.
     ///
     /// The runtime's empty ack carries nothing to parse, so a successful
     /// call yields a [`Session`] handle: no local id validation is applied

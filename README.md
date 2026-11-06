@@ -403,11 +403,16 @@ cannot strand the process), and resolves all pending requests with
 
 ### Notifications
 
-The wire has four server-to-client notifications: `session.event`,
-`session.status`, `subagent.started`, and `subagent.finished`. Tree
-notifications travel a broadcast channel capped at 4096 with drop-oldest
-semantics. If a high-volume tree floods more notifications than fit between
-the SDK's reads, the dropped set can include the inbox receipt or the
+Upstream declares six server-to-client notifications; this crate models four
+of them: `session.event`, `session.status`, `subagent.started`, and
+`subagent.finished`. The two it does not model — `user-question.cancelled`
+and `session.query.completed` — reach it only as unknown method names on the
+subscription path, forwarded as opaque payloads and never consumed.
+`subagent.started` is emitted only for a session whose header `origin` is
+`subagent`, so an ordinary fork adds no tree edge. Tree notifications travel
+a broadcast channel capped at 4096 with drop-oldest semantics. If a
+high-volume tree floods more notifications than fit between the SDK's reads,
+the dropped set can include the inbox receipt or the
 root-idle notification a run depends on — rather than hang forever or return
 a silently truncated result, `Session::run` then **fails fast** with
 `Error::SdkProtocol`. A caller expecting very large bursts can bypass the cap

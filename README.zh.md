@@ -357,9 +357,13 @@ SIGKILL → 等待。该阶梯幂等，是无条件清理（任何一层的失�
 
 ### 通知
 
-线上有四种服务器到客户端的通知：`session.event`、`session.status`、
-`subagent.started`、`subagent.finished`。树通知经由一条容量上限为 4096、
-drop-oldest 语义的广播通道。如果高流量会话树在 SDK 两次读取之间灌入超过
+线上有六种服务器到客户端的通知（上游声明）；本 crate 建模其中四种：
+`session.event`、`session.status`、`subagent.started`、`subagent.finished`。
+未建模的两种——`user-question.cancelled` 与 `session.query.completed`——只以
+未知方法名到达订阅路径，作为不透明载荷原样转发，本 crate 不消费。
+`subagent.started` 仅在会话头的 `origin` 为 `subagent` 时发出，因此普通
+fork 不会新增树边。树通知经由一条容量上限为 4096、drop-oldest 语义的广播
+通道。如果高流量会话树在 SDK 两次读取之间灌入超过
 容量的通知，被丢弃集合可能包含某次 run 所依赖的收件回执或根 idle
 通知——此时 `Session::run` 不会永远挂起或返回静默截断的结果，而是
 **快速失败**，报 `Error::SdkProtocol`。预期超大突发量的调用方只能经由

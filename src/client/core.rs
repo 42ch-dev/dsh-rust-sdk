@@ -577,7 +577,11 @@ impl HarnessClient {
     /// (or their child session is the root), and session-scoped notifications
     /// pass when their `sessionId` is the root or a discovered descendant.
     /// The filter consults the live edge map, so a child started after the
-    /// subscription is matched from its first event onward.
+    /// subscription is matched from its first event onward. The runtime emits
+    /// `subagent.started` only for a session whose header `origin` is
+    /// `subagent` with a known parent
+    /// (`packages/sdk/server/src/server.ts:188-196` at `dsh-v0.2.2-rc.1`), so
+    /// an ordinary fork adds no edge and the tree never infers fork lineage.
     ///
     /// A subscription created after close/runtime death is born-failed:
     /// [`NotificationSubscription::recv`] rejects immediately with

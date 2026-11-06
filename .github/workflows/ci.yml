@@ -59,18 +59,19 @@ jobs:
   # gate is a PM decision, not a workflow change).
   #
   # Pin rationale: the SDK launch/wire contract was re-verified at
-  # deepseek-harness `dsh-v0.2.1-rc.1` (`1600d8a1`, 2026-10-16) by re-running
-  # the `.mstar/specs/` §10 re-verification inventories (report + review:
-  # `.mstar/sdd/12-dsh-0.2.1-rc1-adaptation/task-1-report.md` and
-  # `task-1-review.md`). The wire core holds across the range: `initialize` /
-  # `session/prompt` / `shutdown` and all four notifications keep their
-  # shapes, and the request map grew only additively — the crate wraps just
-  # the three both reference SDKs expose (`session/resume`,
-  # `session/working-directory/get|set`). `session.event.event` stays an
-  # untyped `Value` (wire spec §3.2), so the crate imposes no parser on the
-  # upstream event vocabulary and an added event kind cannot break parsing.
-  # Exact pin, never a dist-tag: the handshake result is reproducible run
-  # to run.
+  # deepseek-harness `dsh-v0.2.2-rc.1` (`66491b05e3`, 2026-11-04) by re-running
+  # the `.mstar/specs/` re-verification inventories (report + review:
+  # `.mstar/sdd/13-dsh-0.2.2-rc1-adaptation/task-1-report.md` and
+  # `task-1-review.md`). The delta is additive only: upstream now declares
+  # eight request methods while this crate still sends six, and six
+  # server-to-client notifications while this crate still models four.
+  # `session/query`, `approval/request`, and `user-question/ask` stay
+  # deliberately unwrapped (wire spec §7.7, §8), so neither the sent method
+  # set nor the modelled notification set changes. `session.event.event` is
+  # still an untyped `Value` (wire spec §3.2), so the crate imposes no parser
+  # on the upstream event vocabulary and an added event kind cannot break
+  # parsing. Exact pin, never a dist-tag: the handshake result is reproducible
+  # run to run.
   keyless-runtime-handshake:
     name: keyless runtime handshake (pinned dsh)
     runs-on: ubuntu-latest
@@ -83,6 +84,9 @@ jobs:
         # actions/setup-node@v7.0.0
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
+          # `24` resolves the newest v24.x release. The pinned runtime's
+          # apps/cli engines floor is `>=24.9.0`, which lives inside this same
+          # major, so the re-pin needed no Node major bump.
           node-version: 24
 
       - name: Cache npm
@@ -92,11 +96,11 @@ jobs:
           path: ~/.npm
           # keyed on the exact pin: the tarball for that version is immutable,
           # so a hit is the full npm cache the pinned global install needs
-          key: ${{ runner.os }}-npm-dsh-cli-0.2.1-rc.1
+          key: ${{ runner.os }}-npm-dsh-cli-0.2.2-rc.1
 
       - name: Install pinned dsh runtime
         # exact pin (never a dist-tag); rationale in the job comment above
-        run: npm install -g @deepseek-ai/dsh@0.2.1-rc.1
+        run: npm install -g @deepseek-ai/dsh@0.2.2-rc.1
 
       - name: Resolve runtime binary
         # Fail loudly when the pinned runtime cannot be resolved: an empty
@@ -105,7 +109,7 @@ jobs:
         run: |
           DSH_RUNTIME_BIN="$(command -v dsh)"
           if [ -z "$DSH_RUNTIME_BIN" ]; then
-            echo "::error::dsh not found on PATH after npm install -g @deepseek-ai/dsh@0.2.1-rc.1"
+            echo "::error::dsh not found on PATH after npm install -g @deepseek-ai/dsh@0.2.2-rc.1"
             exit 1
           fi
           echo "DSH_RUNTIME_BIN=$DSH_RUNTIME_BIN" >> "$GITHUB_ENV"
